@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="my"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin</title>
+<style>
+:root{--r:#e11d2e}*{box-sizing:border-box}
+body{margin:0;background:#fff;color:#000;font-family:system-ui,"Noto Sans Myanmar","Padauk",sans-serif;line-height:1.7}
+main{max-width:560px;margin:0 auto;padding:16px 14px 60px}h1{font-size:1.4rem}
+.card{border:1px solid #e6e6e6;border-radius:14px;padding:16px;margin-bottom:12px}h3{font-size:.95rem;margin:14px 0 4px}
+input{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font:inherit}
+.btn{display:block;width:100%;text-align:center;color:#fff;background:var(--r);border:0;border-radius:10px;padding:13px;font:inherit;font-weight:700;cursor:pointer;margin-top:10px}
+.btn.ol{background:#fff;color:#000;border:1px solid var(--r)}
+#msg{font-weight:700;margin:10px 0 0;white-space:pre-wrap}.ok{color:#1a9d5c}.bad{color:var(--r)}
+table{width:100%;border-collapse:collapse;margin-top:10px;font-size:.9rem}td,th{border-bottom:1px solid #eee;padding:6px;text-align:left}tr.u{cursor:pointer}
+</style></head><body><main>
+<h1>🔐 Admin အခန်း</h1>
+<div class="card">
+<h3>1️⃣ Password</h3><input id="pw" type="password" autocomplete="off">
+<h3>2️⃣ User ID</h3><input id="id" placeholder="U-1A2B3C4D" autocapitalize="characters" autocomplete="off">
+<h3>3️⃣ Video ပုဒ်ရေ</h3><input id="n" type="number" min="0" inputmode="numeric">
+<button class="btn" id="add">➕ ထည့်မည် (ရှိပြီးသားပေါ် ပေါင်းမယ်)</button>
+<button class="btn ol" id="set">✏️ ဒီအရေအတွက်အတိုင်း သတ်မှတ်မည်</button>
+<div id="msg"></div></div>
+<div class="card"><button class="btn ol" id="ls" style="margin-top:0">📋 User စာရင်း ကြည့်မည်</button><div id="tb"></div></div>
+<script>
+const SERVER_URL="https://script.google.com/macros/s/AKfycbxN-nSr2CV6f2nsClYzrTYBzaCQzeCEfCETMvvqOmwqNdEmTLa5RcQiQHG1g-6zu0kn/exec";
+const $=i=>document.getElementById(i);
+function msg(t,ok){const m=$('msg');m.textContent=t;m.className=ok===true?'ok':ok===false?'bad':''}
+async function call(p){const u=new URL(SERVER_URL);Object.entries(p).forEach(([k,v])=>u.searchParams.set(k,v));return (await fetch(u)).json()}
+async function act(a){
+if(SERVER_URL.startsWith('PASTE')){msg('❌ admin.html ထဲက SERVER_URL ကို အရင်ထည့်ပါ',false);return}
+msg('⏳ …');
+try{const j=await call({action:a,pw:$('pw').value,id:$('id').value.trim().toUpperCase(),n:$('n').value});
+if(j.ok){msg('✅ '+j.id+' — ကျန်ရှိ '+j.remaining+' ပုဒ်',true);list()}else msg('❌ '+(j.msg||'မအောင်မြင်ပါ'),false)}
+catch(e){msg('❌ Server ချိတ်မရပါ',false)}}
+async function list(){
+try{const j=await call({action:'list',pw:$('pw').value});
+if(!j.ok){$('tb').textContent=j.msg||'';return}
+const t=document.createElement('table');t.innerHTML='<tr><th>User ID</th><th>ကျန်</th><th>သုံးပြီး</th></tr>';
+j.users.forEach(u=>{const r=t.insertRow();r.className='u';[u.id,u.remaining,u.used].forEach(x=>{r.insertCell().textContent=x});r.onclick=()=>{$('id').value=u.id;window.scrollTo(0,0)}});
+$('tb').replaceChildren(t)}catch(e){$('tb').textContent='ချိတ်မရပါ'}}
+$('add').onclick=()=>act('add');$('set').onclick=()=>act('set');$('ls').onclick=list;
+</script></main></body></html>
