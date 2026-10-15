@@ -1092,40 +1092,36 @@ time.sleep(3)
 from google.colab import output
 from IPython.display import display, HTML
 
-def get_site():
-    # 1) Colab ရဲ့ ကိုယ်ပိုင် proxy link
-    try:
-        u = output.eval_js("google.colab.kernel.proxyPort(8000, {'cache': true})", timeout_sec=20)
-        if u and str(u).startswith("http"): return str(u), "colab"
-    except Exception as e:
-        print("Colab link မရပါ:", str(e)[:100])
-    # 2) မရရင် cloudflared tunnel နဲ့ public link ယူ (ဖုန်း view မှာလည်း အလုပ်လုပ်)
+def start_tunnel():
+    # website ကို cell ထဲမှာ ပြဖို့ public address ယူ (JS မလိုတဲ့နည်း — ဖုန်း view မှာလည်း အလုပ်လုပ်)
     try:
         exe = "/content/cloudflared"
         if not os.path.exists(exe):
             r = requests.get("https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64", timeout=180)
             r.raise_for_status(); open(exe, "wb").write(r.content); os.chmod(exe, 0o755)
         lg = open("/content/cf.log", "w")
-        subprocess.Popen([exe, "tunnel", "--url", "http://localhost:8000", "--no-autoupdate"], stdout=lg, stderr=lg)
+        subprocess.Popen([exe, "tunnel", "--url", "http://localhost:8000", "--no-autoupdate", "--protocol", "http2"], stdout=lg, stderr=lg)
         t0 = time.time()
         while time.time() - t0 < 60:
             m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open("/content/cf.log").read())
-            if m: return m.group(0), "cf"
+            if m:
+                u = m.group(0)
+                for _ in range(20):          # tunnel အသင့်ဖြစ်တဲ့အထိ စောင့်
+                    try:
+                        if requests.get(u + "/", timeout=10).status_code == 200: return u
+                    except Exception: pass
+                    time.sleep(2)
+                return u
             time.sleep(1)
     except Exception as e:
-        print("tunnel link မရပါ:", str(e)[:100])
-    return "", ""
+        print("tunnel မရပါ:", str(e)[:120])
+    return ""
 
-site, kind = get_site()
-print("✅ Website အဆင်သင့်ပါ — Colab tab ကို မပိတ်ပါနဲ့")
+site = start_tunnel()
 if site:
-    print("🔗 Link:", site)
-    display(HTML('<a href="%s" target="_blank" style="display:block;text-align:center;background:#e11d2e;color:#fff;font:700 18px sans-serif;padding:16px;border-radius:12px;text-decoration:none;margin:10px 0">🌐 Website ကို Tab အသစ်မှာ ဖွင့်မည်</a>' % site))
-    if kind == "colab":
-        try: output.serve_kernel_port_as_iframe(8000, height="900")
-        except Exception as e: print("iframe မပေါ်ပါ:", str(e)[:100])
-    else:
-        display(HTML('<iframe src="%s" style="width:100%%;height:900px;border:1px solid #ddd;border-radius:12px;background:#fff"></iframe>' % site))
-    print("💡 အောက်မှာ website မပေါ်ရင် Chrome ⋮ menu → \"Desktop site\" ကို အမှန်ခြစ်ပြီး Colab ကို refresh လုပ်ပါ (ဖုန်း view က iframe မပြတတ်ပါ)။ အပေါ်က ခလုတ်/link ကတော့ အမြဲရပါတယ်။")
+    print("✅ Website အောက်မှာ ပေါ်ပါမယ် — Colab tab ကို မပိတ်ပါနဲ့")
+    display(HTML('<iframe src="%s" allow="clipboard-read; clipboard-write; fullscreen" style="width:100%%;height:1100px;border:0;background:#fff"></iframe>' % site))
 else:
-    print("❌ Website link မရပါ — cell ကို ပြန် run ပါ၊ မရသေးရင် output ကို screenshot ပြပါ")
+    print("⚠️ tunnel မရလို့ Colab နည်းနဲ့ ပြပါတယ်")
+    try: output.serve_kernel_port_as_iframe(8000, height="1100")
+    except Exception as e: print("iframe မပေါ်ပါ:", str(e)[:100])
