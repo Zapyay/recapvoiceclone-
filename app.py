@@ -99,6 +99,7 @@ WORK, FPS = "/content/recap", 30
 GAP = 8.0
 MIN_SPEED = 0.4
 LINE_MAX = 26
+MAX_MIN = 15   # video အရှည်ဆုံး (မိနစ်)
 # scene ခွဲပုံ — စကားတစ်ကြောင်းချင်း အချိန်မှန်အောင် scene တိုတိုခွဲမယ်
 MERGE_SPAN, MERGE_MAX, MERGE_GAP = 3.5, 7.0, 1.0
 os.makedirs(WORK, exist_ok=True)
@@ -457,14 +458,29 @@ def refund_job(job):
 
 CAL = "မင်္ဂလာပါ။ ဒီနေ့ ရာသီဥတု အရမ်းကောင်းပါတယ်။ ကျွန်တော်တို့ အတူတူ ဇာတ်ကားကြည့်ကြရအောင်နော်။"
 
-def synth(t, ref, steps=6):
+def tempo(au, spd, d=None):
+    # အသံမြန်နှုန်း ချိန်ညှိ (အသံအနိမ့်အမြင့် မပြောင်းဘဲ)
+    if abs(spd - 1.0) < 0.02 or len(au) < 200: return au
+    base = os.path.join(d or WORK, "t_" + uuid.uuid4().hex[:8])
+    try:
+        sf.write(base + "_i.wav", au, SR)
+        sh(["ffmpeg", "-y", "-i", base + "_i.wav", "-filter:a", f"atempo={max(0.5, min(2.0, spd)):.3f}", base + "_o.wav"])
+        o, _ = sf.read(base + "_o.wav", dtype="float32")
+        return (o if o.ndim == 1 else o.mean(axis=1)).astype(np.float32)
+    finally:
+        for z in ("_i.wav", "_o.wav"):
+            try: os.remove(base + z)
+            except Exception: pass
+
+def synth(t, ref, steps=6, spd=1.0, d=None):
     ws = []
     for piece in split(t):
         w = model.generate(text=piece, reference_wav_path=ref, cfg_value=2.0, inference_timesteps=steps)
         ws += [np.asarray(w, dtype=np.float32).reshape(-1), np.zeros(int(SR * 0.08), np.float32)]
-    return np.concatenate(ws) if ws else np.zeros(int(SR * 0.2), np.float32)
+    au = np.concatenate(ws) if ws else np.zeros(int(SR * 0.2), np.float32)
+    return tempo(au, spd, d)
 
-def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style):
+def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
     job = JOBS[jid]
     d = os.path.join(WORK, jid); os.makedirs(d, exist_ok=True)
     src = os.path.join(WORK, "up_" + vid) if vid else None
@@ -475,6 +491,12 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style):
         except Exception: stl = {}
         sub = {"on": True, "x": .5, "y": .88, "size": .055, "color": "#ffffff", **(stl.get("sub") or {})}
         bl = {"on": False, "x": .1, "y": .8, "w": .8, "h": .16, "s": 12, **(stl.get("bl") or {})}
+        cl = lambda v, a, b: max(a, min(b, float(v)))
+        bgb = bool(stl.get("bgb", True))                       # Blur နောက်ခံ
+        size = stl.get("size", "orig")
+        if size not in ("orig", "9:16", "3:4", "16:9", "1:1"): size = "orig"
+        Q = 1080 if int(stl.get("q", 1080) or 1080) == 1080 else 720
+        cr = {"on": False, "x": 0, "y": 0, "w": 1, "h": 1, **(stl.get("crop") or {})}
 
         # 1) Link ဒေါင်းပြီးသား / upload ပြီးသား ဖိုင်
         if dlid:
@@ -487,10 +509,24 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style):
                 P(job, 0, "run", dd.get("d", ""), dd.get("f", 0)); time.sleep(1)
             src = dd["path"]; job["name"] = (dd.get("title") or "video")[:120]
         P(job, 0, "done", "", 1); P(job, 1, "run")
-        dur, W, H = probe(src)
+        dur, sw, sh_ = probe(src)
         if dur < 3: raise RuntimeError("Video တိုလွန်းပါတယ် (၃ စက္ကန့်အထက် လိုပါတယ်)")
-        if W >= H: W, H = round(W * 720 / H) // 2 * 2, 720
-        else: W, H = 720, round(H * 720 / W) // 2 * 2
+        if dur > MAX_MIN * 60 + 5: raise RuntimeError(f"Video က {MAX_MIN} မိနစ်ထက် ပိုရှည်နေပါတယ် ({dur/60:.1f} မိနစ်) — တိုတိုဖြတ်ပြီး ထပ်ထည့်ပါ")
+        # Crop (မူရင်း pixel၊ ဂဏန်းစုံကိုပဲ သုံး)
+        crop_on = bool(cr.get("on"))
+        if crop_on:
+            cx = int(cl(cr["x"], 0, .95) * sw) // 2 * 2; cy = int(cl(cr["y"], 0, .95) * sh_) // 2 * 2
+            cw = max(16, int(cl(cr["w"], .05, 1) * sw) // 2 * 2); ch_ = max(16, int(cl(cr["h"], .05, 1) * sh_) // 2 * 2)
+            cw = min(cw, (sw - cx) // 2 * 2); ch_ = min(ch_, (sh_ - cy) // 2 * 2)
+        else: cx = cy = 0; cw, ch_ = sw, sh_
+        # ထွက်မယ့် Size (အတိုဘက် = Quality)
+        ar = (cw / ch_) if size == "orig" else (int(size.split(":")[0]) / int(size.split(":")[1]))
+        if ar >= 1: H, W = Q, round(Q * ar)
+        else: W, H = Q, round(Q / ar)
+        W, H = W // 2 * 2, H // 2 * 2
+        need_bg = bgb and abs(cw / ch_ - W / H) > 0.01       # Size မကိုက်ရင် Blur နောက်ခံ ဖြည့်
+        bw, bh = max(2, (W // 10) // 2 * 2), max(2, (H // 10) // 2 * 2)
+        crop_f = f"crop={cw}:{ch_}:{cx}:{cy}," if crop_on else ""
         P(job, 1, "done", f"{dur/60:.1f} မိနစ်" if dur >= 60 else f"{dur:.0f} စက္ကန့်", 1)
 
         # 2) AssemblyAI
@@ -514,7 +550,7 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style):
             refs.append(rp)
         with GPU:
             P(job, 3, "run", "", .4)
-            w = synth(CAL, refs[0], steps)
+            w = synth(CAL, refs[0], steps, spd, d)
         cps = max(6.0, min(20.0, len(CAL) / max(0.5, len(w) / SR))) * 0.8
         P(job, 3, "done", f"{cps:.1f} လုံး/စက္ကန့်", 1)
 
@@ -550,8 +586,14 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style):
             n = max(FPS, math.ceil(dd * FPS)); dd = n / FPS
             need = max(0.3, min(dd * s, T, dur - a))
             sp_ = os.path.join(d, f"seg{i}.mp4")
-            vf = f"setpts=(PTS-STARTPTS)/{s:.5f},fps={FPS},scale={W}:{H},tpad=stop_mode=clone:stop_duration=30,setsar=1,format=yuv420p"
-            cmd = ["nice", "-n", "19", "ffmpeg", "-y", "-ss", f"{min(a, dur - 0.5):.3f}", "-t", f"{need:.3f}", "-i", src, "-an", "-vf", vf]
+            pre = f"{crop_f}setpts=(PTS-STARTPTS)/{s:.5f},fps={FPS},tpad=stop_mode=clone:stop_duration=30,setsar=1"
+            fit = f"scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2"
+            if need_bg:
+                bgf = f"scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},gblur=sigma=2,scale={W}:{H}"
+                fc = f"[0:v]{pre},split[a][b];[b]{bgf}[bg];[a]{fit}[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
+            else:
+                fc = f"[0:v]{pre},{fit},pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[v]"
+            cmd = ["nice", "-n", "19", "ffmpeg", "-y", "-ss", f"{min(a, dur - 0.5):.3f}", "-t", f"{need:.3f}", "-i", src, "-an", "-filter_complex", fc, "-map", "[v]"]
             sh(cmd + ["-frames:v", str(n), "-c:v", "libx264", "-preset", "superfast", "-crf", "24", "-threads", "1", "-r", str(FPS), sp_])
             Tn = int(round(n * SR / FPS)); full[i] = np.pad(au, (0, max(0, Tn - len(au))))[:Tn]; segs[i] = sp_; tot[i] = dd
             with lk:
@@ -568,12 +610,12 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style):
                 ref = refs[x.get("spk", 0)] if mode == "dubbing" else refs[0]
                 if t:
                     T = b - a
-                    au = synth(t, ref, steps)
+                    au = synth(t, ref, steps, spd, d)
                     L = len(au) / SR
                     if L > T * 1.5 and len(t) > 25:
                         try:
                             t2 = shorten(t, len(t) * T * 1.2 / L)
-                            au2 = synth(t2, ref, steps)
+                            au2 = synth(t2, ref, steps, spd, d)
                             if len(au2) < len(au): au, t = au2, t2
                         except Exception: pass
                 else:
@@ -638,13 +680,11 @@ HTML = r'''<!DOCTYPE html><html lang="my"><head><meta charset="UTF-8"><meta name
 :root{color-scheme:light;--r:#e11d2e}*{box-sizing:border-box}
 body{margin:0;background:#fff;color:#000;font-family:system-ui,"Noto Sans Myanmar","Padauk",sans-serif;line-height:1.7}
 main{max-width:720px;margin:0 auto;padding:16px 14px 60px}h1{font-size:1.5rem;margin:6px 0 12px}
-.card{border:1px solid #e6e6e6;border-radius:14px;padding:16px;margin-bottom:12px}h2{font-size:1.05rem;margin:0 0 10px}h3{font-size:.95rem;margin:14px 0 4px}
+.card{border:1px solid #e6e6e6;border-radius:14px;padding:16px;margin-bottom:12px}h2{font-size:1.05rem;margin:0 0 10px}h3{font-size:.95rem;margin:14px 0 6px}
 input[type=file],select,input[type=text]{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font:inherit;color:#000;background:#fff}
 video,audio{width:100%;margin-top:10px}video{background:#000;border-radius:8px}
 .btn{display:block;text-align:center;text-decoration:none;color:#fff;background:var(--r);border:0;border-radius:10px;padding:13px;width:100%;font:inherit;font-weight:700;cursor:pointer;margin-top:10px}
 .btn.ol{background:#fff;color:#000;border:1px solid var(--r)}.btn:disabled{opacity:.4}.row{display:flex;gap:8px;align-items:center}
-.tabs{display:flex;gap:8px;margin-bottom:12px}.tabs button{flex:1;padding:10px;border:1px solid var(--r);border-radius:10px;background:#fff;color:#000;font:inherit;font-weight:700;cursor:pointer}
-.tabs button.on{background:var(--r);color:#fff}
 .note{font-size:.82rem;color:#000;margin-top:6px;opacity:.75}ul{list-style:none;padding:0;margin:0}
 li{padding:8px;display:flex;gap:10px;align-items:center;border-bottom:1px dashed #e6e6e6;border-radius:8px;color:#777}.ic{width:24px;text-align:center}
 .sp{display:inline-block;width:20px;height:20px;border:3px solid #e3e3e3;border-top-color:var(--r);border-radius:50%;animation:r .7s linear infinite;flex:none}
@@ -653,174 +693,236 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 .d{margin-left:auto;font-size:.82rem;text-align:right}
 .live{display:flex;align-items:center;gap:14px;margin-bottom:8px}.big{width:46px;height:46px;border:5px solid #eee;border-top-color:var(--r);border-radius:50%;animation:r .8s linear infinite;flex:none}
 .big.fin{animation:none;border-color:#1a9d5c;display:flex;align-items:center;justify-content:center;color:#1a9d5c;font-size:1.4rem}.big.bad{animation:none;border-color:var(--r);color:var(--r);display:flex;align-items:center;justify-content:center;font-size:1.4rem}
-#pct,#dpct{font-size:1.9rem;font-weight:800;line-height:1.1}#el{margin-left:auto;font-size:1rem;font-weight:700}
+#pct{font-size:1.9rem;font-weight:800;line-height:1.1}#el{margin-left:auto;font-size:1rem;font-weight:700}
 .bar{height:14px;background:#eee;border-radius:10px;overflow:hidden}.bar i{display:block;height:100%;width:0;border-radius:10px;transition:width .6s;background:var(--r)}
 .hide{display:none!important}pre{white-space:pre-wrap;font-size:.8rem;color:var(--r)}
 .opt{display:flex;gap:10px;align-items:flex-start;border:1px solid #ddd;border-radius:12px;padding:12px;margin:8px 0;cursor:pointer}.opt input{margin-top:6px;accent-color:var(--r)}
 .ctl{display:flex;align-items:center;gap:10px;margin-top:10px}.ctl label{min-width:92px;font-size:.9rem}.ctl input[type=range]{flex:1;accent-color:var(--r)}.ctl input[type=color]{width:56px;height:36px;border:1px solid #ccc;border-radius:8px;padding:2px;background:#fff}
-#stage{position:relative;line-height:0;user-select:none;-webkit-user-select:none;overflow:hidden;border-radius:8px}
-#stage video{display:block;width:100%;height:auto;margin:0;border-radius:0}
-#bz{position:absolute;border:2px dashed var(--r);touch-action:none;cursor:move}
-#bh{position:absolute;right:-2px;bottom:-2px;width:28px;height:28px;background:var(--r);border-radius:6px 0 8px 0;touch-action:none;cursor:nwse-resize}
-#sb{position:absolute;transform:translate(-50%,-50%);text-align:center;white-space:pre;font-weight:700;line-height:1.5;font-family:"Noto Sans Myanmar","Padauk",system-ui,sans-serif;text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 2px 4px #000;touch-action:none;cursor:move;padding:0 6px;outline:1px dashed rgba(255,255,255,.8)}
 .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.top .id{font-weight:800;letter-spacing:.5px;user-select:all}
 .mini{border:1px solid var(--r);background:#fff;border-radius:8px;padding:2px 10px;font:inherit;cursor:pointer}
 .hi{border:1px solid #e6e6e6;border-radius:12px;padding:12px;margin:8px 0}.hi b{word-break:break-all}.hi .bar{height:8px;margin-top:6px}
+.drop{display:block;text-align:center;border:2px dashed #f1a1a8;background:#fff5f6;border-radius:16px;padding:24px 12px;cursor:pointer}
+.drop .ico{width:48px;height:48px;margin:0 auto 8px;background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08);display:flex;align-items:center;justify-content:center;font-size:1.4rem;color:var(--r)}
+.or{display:flex;align-items:center;gap:10px;color:#666;font-size:.85rem;margin:12px 0}.or:before,.or:after{content:"";flex:1;height:1px;background:#e6e6e6}
+.lrow{display:flex;gap:8px}.lbox{flex:1;display:flex;align-items:center;border:1px solid #ddd;border-radius:12px;padding:3px 3px 3px 10px;min-width:0}
+.lbox input{border:0;padding:8px 4px;min-width:0;flex:1;outline:0;font:inherit;background:#fff;color:#000}
+.pst{border:0;background:#fdecee;color:var(--r);font-weight:700;border-radius:9px;padding:8px 10px;font:inherit;font-weight:700;cursor:pointer;white-space:nowrap}
+.dlb{border:0;background:#1b1b2b;color:#fff;font-weight:700;border-radius:12px;padding:0 14px;font:inherit;font-weight:700;cursor:pointer;white-space:nowrap}
+.tabs3{display:flex;border-bottom:1px solid #e6e6e6;margin:14px 0 12px}
+.tabs3 button{flex:1;background:none;border:0;border-bottom:3px solid transparent;padding:12px 4px;font:inherit;font-weight:700;color:#666;cursor:pointer}
+.tabs3 button.on{color:#000;border-bottom-color:#3b8bff}
+.chips{display:flex;flex-wrap:wrap;gap:8px}.chip{border:1px solid #ccc;border-radius:10px;padding:8px 14px;cursor:pointer;font-weight:600}.chip input{display:none}.chip.on{background:var(--r);border-color:var(--r);color:#fff}
+.sw{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #eee;font-weight:600}
+.sw input{appearance:none;-webkit-appearance:none;width:46px;height:26px;border-radius:20px;background:#ccc;position:relative;flex:none;cursor:pointer;transition:.2s;margin:0}
+.sw input:before{content:"";position:absolute;left:3px;top:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.2s}
+.sw input:checked{background:var(--r)}.sw input:checked:before{left:23px}
+.pane{padding:6px 0 4px}
+.stg{position:relative;line-height:0;user-select:none;-webkit-user-select:none;overflow:hidden;border-radius:8px;background:#000;width:100%;max-width:420px;margin:10px auto 0;aspect-ratio:16/9}
+.stg canvas{position:absolute;left:0;top:0;width:100%;height:100%}
+#bz,#cz{position:absolute;touch-action:none;cursor:move}
+#bz{border:2px dashed var(--r)}
+#cz{border:2px solid #fff;box-shadow:0 0 0 999px rgba(0,0,0,.55)}
+.hd{position:absolute;width:30px;height:30px;background:var(--r);touch-action:none}
+#sb{position:absolute;transform:translate(-50%,-50%);text-align:center;white-space:pre;font-weight:700;line-height:1.5;font-family:"Noto Sans Myanmar","Padauk",system-ui,sans-serif;text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 2px 4px #000;touch-action:none;cursor:move;padding:0 6px;outline:1px dashed rgba(255,255,255,.8)}
 </style></head><body><main>
 <h1>🎬 Auto Movie Recap</h1>
-<div class="card" id="topc"><div class="top"><span>🆔 User ID:</span><span class="id" id="uid">…</span><button class="mini" id="cp">📋 Copy</button></div>
+<div class="card"><div class="top"><span>🆔 User ID:</span><span class="id" id="uid">…</span><button class="mini" id="cp">📋 Copy</button></div>
 <div class="note" style="opacity:1">🎞 ထုတ်ခွင့်ကျန်: <span id="rem">…</span></div>
 <div class="row"><button class="btn ol" id="hbtn">📜 History</button><button class="btn ol" id="newbtn">➕ Video အသစ်</button></div></div>
-<div class="note" id="dots"></div>
 
-<div class="card" id="p1"><h2>အဆင့် ၁ — Link (သို့) Video ထည့်ပါ</h2>
-<div class="tabs"><button id="tl" class="on">🔗 Link</button><button id="tf">📁 ဖိုင်တင်မည်</button></div>
-<div id="pl"><input id="lk" type="text" placeholder="TikTok / YouTube / Facebook / Rednote link ကို paste လုပ်ပါ" autocomplete="off">
-<div class="note">Share လုပ်ရင်ရတဲ့ စာတွေပါနေလည်း ရပါတယ် (link ကို အလိုအလျောက် ရွေးယူပါမယ်)။ Public video ဖြစ်ရပါမယ်။</div>
-<h3>🍪 cookies.txt (YouTube/Facebook က ပိတ်ရင်သာ ထည့်ပါ — မထည့်လည်းရ)</h3><input id="ck" type="file" accept=".txt,text/plain"></div>
-<div id="pf" class="hide"><input id="vf" type="file" accept="video/*"><div class="note">ဖိုင်ကို နောက်ကွယ်မှာ တင်ပေးမယ် — ဒေါင်းတာ စောင့်စရာမလို၊ Next ကို တန်းနှိပ်ပါ။</div></div>
-<button class="btn" id="n1" disabled>Next ➜</button></div>
+<div id="v-main">
+<div class="card">
+<label class="drop" for="vf"><div class="ico">⬆</div><b id="dropt">Video ဖိုင် ရွေးပါ</b><div class="note">MP4, MOV, MKV · ၁၅ မိနစ်အထိ</div></label>
+<input id="vf" type="file" accept="video/*" class="hide">
+<div class="or">သို့မဟုတ် Link ထည့်ပါ</div>
+<div class="lrow"><div class="lbox"><input id="lk" type="text" placeholder="TikTok / YouTube link ထည့်ပါ" autocomplete="off"><button class="pst" id="pst">📋 Paste</button></div><button class="dlb" id="dlb">🔗 ဒေါင်းမည်</button></div>
+<div id="dlw" class="hide" style="margin-top:10px"><div class="bar"><i id="dpb"></i></div><div class="note" id="dtx"></div><pre id="der"></pre></div>
+<details style="margin-top:8px"><summary class="note">🍪 cookies.txt (YouTube/Facebook က ပိတ်ရင်သာ ထည့်ပါ)</summary><input id="ck" type="file" accept=".txt,text/plain"></details>
+<video id="pv" controls playsinline class="hide"></video>
+<div class="note" id="vmsg"></div>
+</div>
 
-<div class="card hide" id="p2"><h2>အဆင့် ၂ — Video ဒေါင်းနေပါတယ်</h2>
-<div class="live"><div class="big" id="dsp"></div><div><div id="dpct">0%</div><div class="note" id="dtx" style="margin:0">စတင်နေပါတယ်…</div></div></div>
-<div class="bar"><i id="dpb"></i></div>
-<video id="dv" controls playsinline class="hide"></video><div class="note hide" id="dvn">▶ ဒေါင်းပြီးပြီ — ကိုယ်ထည့်တဲ့ video မှန်မမှန် စမ်းကြည့်ပါ</div><pre id="der"></pre>
-<div class="row"><button class="btn ol" data-b="1">⬅ Back</button><button class="btn" id="n2" disabled>Next ➜</button></div></div>
+<div class="tabs3"><button data-t="1" class="on">ဗီဒီယို</button><button data-t="2">စာတန်း</button><button data-t="3">အသံ</button></div>
 
-<div class="card hide" id="p3"><h2>အဆင့် ၃ — စာတန်း + Blur နေရာ ညှိပါ</h2>
-<div id="stage"><video id="sv" playsinline muted preload="metadata"></video><div id="bz"><div id="bh"></div></div><div id="sb">မြန်မာစာတန်း နမူနာ
-ဒီနေရာမှာ ပေါ်ပါမယ်</div></div>
-<button class="btn ol" id="pp" style="margin-top:8px">▶ / ⏸ Video ဖွင့်ကြည့်</button>
-<div class="note">စာတန်းကို လက်နဲ့ ဆွဲရွှေ့ပါ။ Blur ဘောက်စ်ကို ဆွဲရွှေ့ပါ၊ အောက်ညာထောင့် အနီစတုရန်းကို ဆွဲပြီး အရွယ်အစား ပြောင်းပါ။</div>
-<div class="ctl"><label><input type="checkbox" id="so" checked style="accent-color:#e11d2e"> စာတန်း ထည့်မယ်</label></div>
-<div class="ctl"><label>🎨 စာအရောင်</label><input type="color" id="sc" value="#ffffff"></div>
-<div class="ctl"><label>🔠 စာအရွယ်</label><input type="range" id="ss" min="20" max="120" value="55"></div>
-<div class="ctl"><label><input type="checkbox" id="bo" checked style="accent-color:#e11d2e"> Blur အုပ်မယ်</label><input type="range" id="bs" min="2" max="40" value="12"></div>
-<div class="note">စာတန်း/Blur မလိုရင် အပေါ်က အမှန်ခြစ်ကို ဖြုတ်ထားပါ။</div>
-<div class="row"><button class="btn ol" id="b3">⬅ Back</button><button class="btn" id="n3">Next ➜</button></div></div>
-
-<div class="card hide" id="p4"><h2>အဆင့် ၄ — Recap လား Dubbing လား ရွေးပါ</h2>
-<label class="opt"><input type="radio" name="md" value="recap" checked><div><b>🎙 Recap</b><div class="note">ဇာတ်လမ်းတစ်ပုဒ်လုံးကို လူတစ်ယောက်တည်း နောက်ခံအသံနဲ့ ပြောပြသလို ထုတ်မယ်။ (အသံ ၁ ခုပဲ ထည့်ရမယ်)</div></div></label>
-<label class="opt"><input type="radio" name="md" value="dubbing"><div><b>🎭 Dubbing</b><div class="note">Video ထဲမှာ လူနှစ်ယောက် စကားပြောတဲ့နေရာတွေ ပါရင် စကားပြောသူကို ခွဲပြီး ထုတ်မယ်။ (အသံ ၂ ခု ထည့်လို့ရမယ်)</div></div></label>
+<div class="card" id="t1">
+<h3 style="margin-top:0">Model</h3>
+<label class="opt"><input type="radio" name="md" value="recap" checked><div><b>🎙 Recap</b><div class="note">ဇာတ်လမ်းတစ်ပုဒ်လုံးကို လူတစ်ယောက်တည်း နောက်ခံအသံနဲ့ ပြောပြသလို ထုတ်မယ်။ (အသံ ၁ ခု)</div></div></label>
+<label class="opt"><input type="radio" name="md" value="dubbing"><div><b>🎭 Dubbing</b><div class="note">လူနှစ်ယောက် စကားပြောတာကို ခွဲပြီး ထုတ်မယ်။ (အသံ ၂ ခု ထည့်လို့ရ)</div></div></label>
+<h3>Video Size</h3>
+<div class="chips"><label class="chip on"><input type="radio" name="sz" value="orig" checked>မူရင်း</label><label class="chip"><input type="radio" name="sz" value="9:16">9:16</label><label class="chip"><input type="radio" name="sz" value="3:4">3:4</label><label class="chip"><input type="radio" name="sz" value="16:9">16:9</label><label class="chip"><input type="radio" name="sz" value="1:1">1:1</label></div>
+<h3>Video Quality</h3>
+<div class="chips"><label class="chip on"><input type="radio" name="ql" value="1080" checked>HD 1080P</label><label class="chip"><input type="radio" name="ql" value="720">720P</label></div>
+<div class="note" id="osz"></div>
 <h3>🌐 Video ထဲက စကားပြောဘာသာ</h3><select id="lang"><option value="auto" selected>အလိုအလျောက် သိမယ် (Auto)</option><option value="en">English</option><option value="zh">Chinese</option><option value="ko">Korean</option><option value="ja">Japanese</option><option value="th">Thai</option><option value="hi">Hindi</option><option value="es">Spanish</option><option value="fr">French</option></select>
-<h3>⚡ အသံထုတ်မြန်နှုန်း</h3><select id="q"><option value="4">အမြန်ဆုံး (အရည်အသွေး နည်းနည်းလျော့)</option><option value="6" selected>ပုံမှန်</option><option value="10">အကောင်းဆုံး (နှေးတယ်)</option></select>
-<div class="row"><button class="btn ol" id="b4">⬅ Back</button><button class="btn" id="n4">Next ➜</button></div></div>
+<div class="sw" style="margin-top:12px"><span>✂ Crop (Video ကို လိုသလောက် ဖြတ်မယ်)</span><input type="checkbox" id="t-cr"></div>
+<div id="cpane" class="pane hide"><div class="stg" id="cstage"><canvas id="cv2"></canvas><div id="cz"><div class="hd" id="ch1" style="left:-2px;top:-2px;border-radius:0 0 8px 0"></div><div class="hd" id="ch2" style="right:-2px;bottom:-2px;border-radius:8px 0 0 0"></div></div></div>
+<div class="note">အဖြူစတုရန်းကို ဆွဲရွှေ့ပါ။ ထောင့်နှစ်ခု (အနီ) ကို ဆွဲပြီး ဖြတ်မယ့်နေရာ အရွယ်ပြောင်းပါ။ ဖြတ်ထားတဲ့အပိုင်းကို ရွေးထားတဲ့ Size ထဲ ထည့်ပေးမယ်။</div></div>
+</div>
 
-<div class="card hide" id="p5"><h2>အဆင့် ၅ — Voice Clone နမူနာအသံ</h2>
-<h3 id="v1t">🎤 နမူနာအသံ</h3><input id="af" type="file" accept="audio/*,video/*"><audio id="ap" controls class="hide"></audio>
+<div class="card hide" id="t2">
+<div class="stg" id="stage"><canvas id="cv"></canvas><div id="bz"><div class="hd" id="bh" style="right:-2px;bottom:-2px;border-radius:8px 0 0 0"></div></div><div id="sb">မြန်မာစာတန်း နမူနာ
+ဒီနေရာမှာ ပေါ်ပါမယ်</div></div>
+<button class="btn ol" id="pp">▶ / ⏸ Video ဖွင့်ကြည့်</button>
+<div class="note">စာတန်းကို လက်နဲ့ ဆွဲရွှေ့ပါ။ Blur ဘောက်စ်ကို ဆွဲရွှေ့ပါ၊ အောက်ညာထောင့် အနီစတုရန်းကို ဆွဲပြီး အရွယ်စား ပြောင်းပါ။</div>
+<div class="sw" style="margin-top:8px"><span>စာတန်း / အရောင် ချိန်ညှိ</span><input type="checkbox" id="t-sub" checked></div>
+<div id="subctl" class="pane"><div class="ctl"><label>🎨 စာအရောင်</label><input type="color" id="sc" value="#ffffff"></div><div class="ctl"><label>🔠 စာအရွယ်</label><input type="range" id="ss" min="20" max="120" value="55"></div></div>
+<div class="sw"><span>Blur ချိန်ညှိ</span><input type="checkbox" id="t-bl"></div>
+<div id="blctl" class="pane hide"><div class="ctl"><label>💧 Blur အားစိုက်</label><input type="range" id="bs" min="2" max="40" value="12"></div></div>
+<div class="sw"><span>Blur နောက်ခံ</span><input type="checkbox" id="t-bg" checked></div>
+<div class="note">Blur နောက်ခံ = ရွေးထားတဲ့ Size နဲ့ Video မကိုက်လို့ ကျန်တဲ့နေရာကို Video ကိုယ်တိုင်ကို blur လုပ်ပြီး ဖြည့်ပေးတာ။ ပိတ်ထားရင် အနက်ရောင်ပဲ ဖြည့်မယ်။ စာတန်း/Blur မလိုရင် အပေါ်က ခလုတ်တွေကို ပိတ်ထားပါ။</div>
+</div>
+
+<div class="card hide" id="t3">
+<h3 style="margin-top:0" id="v1t">🎤 အသံနမူနာ ထည့်ပါ</h3><input id="af" type="file" accept="audio/*,video/*"><audio id="ap" controls class="hide"></audio>
 <div id="v2w" class="hide"><h3>🎤 Voice 2 (ဒုတိယလူအတွက် — မထည့်လည်းရ)</h3><input id="af2" type="file" accept="audio/*,video/*"><audio id="ap2" controls class="hide"></audio>
 <div class="note">Voice 2 မထည့်ရင် နှစ်ယောက်လုံး Voice 1 နဲ့ပဲ ပြောပါမယ်။</div></div>
+<div id="spw" class="hide"><h3>⏱ အနှေး အမြန် ချိန်ညှိ</h3>
+<div class="ctl"><span>🐢</span><input type="range" id="sp" min="0.6" max="1.5" step="0.05" value="1"><span>🐇</span></div>
+<div class="note">အသံမြန်နှုန်း: <b id="spv">1.00x</b> (1.00x = ပုံမှန်)။ မြန်လေ အသံတိုလေ၊ နှေးရင် အသံရှည်လို့ Video ကို နှေးပေးရနိုင်တယ်။</div></div>
+<h3>⚡ အသံထုတ် အရည်အသွေး</h3><select id="q"><option value="4">အမြန်ဆုံး (အရည်အသွေး နည်းနည်းလျော့)</option><option value="6" selected>ပုံမှန်</option><option value="10">အကောင်းဆုံး (နှေးတယ်)</option></select>
 <div class="note">သန့်တဲ့ အသံ စက္ကန့် ၁၀–၃၀။ ကိုယ့်အသံ (သို့) ခွင့်ပြုချက်ရတဲ့ အသံသာ သုံးပါ။</div>
-<div class="note">ℹ️ အသံရှည်နေရင် video ကို နှေးပေးပါမယ်။ ⏳ ၁၀ မိနစ် video ဆို ၁၅–၃၀ မိနစ်ခန့် ကြာနိုင်ပါတယ်။ Colab tab ကို မပိတ်ပါနဲ့။</div>
-<div class="row"><button class="btn ol" id="b5">⬅ Back</button><button class="btn" id="go" disabled>▶ စတင်မည်</button></div></div>
+<div class="note">ℹ️ ⏳ ၁၀ မိနစ် video ဆို ၁၅–၃၀ မိနစ်ခန့် ကြာနိုင်ပါတယ်။ Colab tab ကို မပိတ်ပါနဲ့။</div>
+</div>
+<button class="btn" id="go" disabled>▶ စတင်မည်</button>
+<div class="note" id="gon">Video နဲ့ အသံနမူနာ နှစ်ခုလုံး ထည့်ပြီးမှ စလို့ရပါမယ်။</div>
+</div>
 
-<div class="card hide" id="p6"><h2>အဆင့် ၆ — လုပ်ဆောင်ချက် — <span id="jn"></span></h2>
+<div id="v-job" class="card hide"><h2>လုပ်ဆောင်ချက် — <span id="jn"></span></h2>
 <div class="live"><div class="big" id="bigsp"></div><div><div id="pct">0%</div><div class="note" id="cur" style="margin:0">စတင်နေပါတယ်…</div></div><div id="el">⏱ 00:00</div></div>
-<div class="bar" id="barw"><i id="pb"></i></div><div class="note" id="upn"></div><div class="note" id="hb"></div>
+<div class="bar"><i id="pb"></i></div><div class="note" id="upn"></div><div class="note" id="hb"></div>
 <ul id="st" style="margin-top:8px"></ul><pre id="er"></pre>
 <button class="btn ol" id="nx">➕ Video အသစ်ထုတ်မည်</button>
 <div class="note">ဒီ video ကို နောက်ကွယ်မှာ ဆက်လုပ်နေမယ်။ နောက်တစ်ပုဒ် စထုတ်လို့ရတယ်၊ 📜 History မှာ ပြန်ကြည့်နိုင်တယ်။</div></div>
 
-<div class="card hide" id="p7"><h2>အဆင့် ၇ — ရလဒ် — <span id="rn"></span></h2><video id="rv" controls playsinline></video>
+<div id="v-res" class="card hide"><h2>ရလဒ် — <span id="rn"></span></h2><video id="rv" controls playsinline></video>
 <input id="fn" type="text" placeholder="ဖိုင်အမည် (မပေးလည်းရ)" style="margin-top:10px">
 <a id="dl" class="btn">⬇ MP4 ဒေါင်းမည်</a>
 <button class="btn ol" id="nx2">➕ Video အသစ်ထုတ်မည်</button></div>
 
-<div class="card hide" id="p8"><h2>📜 History</h2><div id="hl"></div>
+<div id="v-hist" class="card hide"><h2>📜 History</h2><div id="hl"></div>
 <button class="btn ol" id="hb8">➕ Video အသစ်ထုတ်မည်</button></div>
 </main><script>
 const $=i=>document.getElementById(i);
-let mode='link',vf=null,af=null,af2=null,dlid=null,vurl=null,vid=null,upP=null,jid=null,watching=null,cur=1,dT=null,curId=null,seen={},REM=null;
-const ST={sub:{on:true,x:.5,y:.88,size:.055,color:'#ffffff'},bl:{on:true,x:.1,y:.8,w:.8,h:.16,s:12}};
+let vf=null,af=null,af2=null,dlid=null,vid=null,upP=null,srcReady=false,dur=0,objU=null,watching=null,view='main',dT=null,curId=null,seen={},REM=null;
+const ST={sub:{on:true,x:.5,y:.88,size:.055,color:'#ffffff'},bl:{on:false,x:.1,y:.8,w:.8,h:.16,s:12},bgb:true,size:'orig',q:1080,crop:{on:false,x:.1,y:.1,w:.8,h:.8}};
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const STEPS=["Video ရယူခြင်း","Video စစ်ဆေးခြင်း","AssemblyAI နဲ့ စကားကို စာထုတ်ခြင်း","နမူနာအသံ ပြင်ဆင်ခြင်း","Gemini နဲ့ မြန်မာလို ဘာသာပြန်ခြင်း","Voice Clone နဲ့ အသံထုတ်ခြင်း","Video ဖြတ်ညှိခြင်း","စာတန်း + Blur ထည့်ပြီး MP4 ထုတ်ခြင်း","ပြီးစီးပါပြီ"];
 const mm=s=>String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0');
 const c=(v,a,b)=>Math.max(a,Math.min(b,v));
 const rid=()=>Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');
-function show(n){cur=n;for(let i=1;i<=8;i++)$('p'+i).classList.toggle('hide',i!=n);$('dots').textContent=n==8?'History':'အဆင့် '+n+' / 7';if(n!=7)$('rv').pause();if(n!=3)$('sv').pause();window.scrollTo(0,0);if(n==3)setTimeout(paint,80);if(n==8)loadHist()}
-document.querySelectorAll('[data-b]').forEach(b=>b.onclick=()=>show(+b.dataset.b));
+const MAXS=900;
+function show(v){view=v;['main','job','res','hist'].forEach(n=>$('v-'+n).classList.toggle('hide',n!=v));if(v!='res')$('rv').pause();if(v!='main')$('pv').pause();window.scrollTo(0,0);if(v=='main')setTimeout(paint,80);if(v=='hist')loadHist()}
+function setTab(n){document.querySelectorAll('.tabs3 button').forEach(b=>b.classList.toggle('on',+b.dataset.t==n));[1,2,3].forEach(i=>$('t'+i).classList.toggle('hide',i!=n));setTimeout(paint,60)}
+document.querySelectorAll('.tabs3 button').forEach(b=>b.onclick=()=>setTab(+b.dataset.t));
 
 // ---- User ID + ထုတ်ခွင့်
 async function refreshMe(){let m;try{m=await(await fetch('/api/me')).json()}catch(e){return}
 $('uid').textContent=m.uid;REM=(m.limited&&m.ok)?m.rem:null;
 $('rem').innerHTML=!m.ok?'<span style="color:#e11d2e">'+esc(m.msg||'Server ချိတ်မရပါ')+'</span>':m.limited?'<b>'+m.rem+'</b> ပုဒ်':'ကန့်သတ်မထား (စမ်းသပ်ခြင်း)'}
 $('cp').onclick=()=>{try{navigator.clipboard.writeText($('uid').textContent);$('cp').textContent='✔ Copied'}catch(e){}};
-$('hbtn').onclick=()=>show(8);
+$('hbtn').onclick=()=>show('hist');
 
-function chk(){$('n1').disabled=!(mode=='link'?/https?:\/\//i.test($('lk').value):!!vf)}
-function setMode(m){mode=m;$('tl').classList.toggle('on',m=='link');$('tf').classList.toggle('on',m=='file');$('pl').classList.toggle('hide',m!='link');$('pf').classList.toggle('hide',m!='file');chk()}
-$('tl').onclick=()=>setMode('link');$('tf').onclick=()=>setMode('file');$('lk').oninput=chk;
-$('vf').onchange=e=>{vf=e.target.files[0]||null;chk()};
 async function upload(f,id,cb){const CH=8*1024*1024,n=Math.max(1,Math.ceil(f.size/CH));for(let i=0;i<n;i++){const fd=new FormData();fd.append('id',id);fd.append('idx',i);fd.append('n',n);fd.append('chunk',f.slice(i*CH,(i+1)*CH),'c');
 const r=await fetch('/api/up',{method:'POST',body:fd});if(!r.ok)throw new Error('တင်လို့မရပါ ('+r.status+')');if(cb)cb((i+1)/n)}}
-function setSv(u){const v=$('sv');v.src=u;v.onloadedmetadata=()=>{try{v.currentTime=0.1}catch(e){}paint()};v.load()}
+function upd(){const long=dur>MAXS;$('vmsg').style.color=long?'#e11d2e':'';
+if(long)$('vmsg').textContent='⚠️ Video က ၁၅ မိနစ်ထက် ပိုရှည်နေပါတယ် ('+mm(dur)+') — တိုတိုလေး ဖြတ်ပြီး ထပ်ထည့်ပါ';
+$('go').disabled=!(srcReady&&af&&!long);
+$('gon').textContent=!srcReady?'Video (သို့) Link ကို အရင်ထည့်ပါ':!af?'အသံနမူနာကို "အသံ" tab မှာ ထည့်ပါ':long?'Video ရှည်လွန်းနေပါတယ်':'အားလုံးအဆင်သင့်ပါ — စတင်လို့ရပါပြီ'}
 
-// ---- အဆင့် ၁ → ၂ / ၃
-$('n1').onclick=async()=>{
-if(mode=='link'){const ckf=$('ck').files[0];if(ckf){const cf=new FormData();cf.append('f',ckf);try{await fetch('/api/cookies',{method:'POST',body:cf})}catch(e){}}const fd=new FormData();fd.append('url',$('lk').value);let j={};try{j=await(await fetch('/api/dl',{method:'POST',body:fd})).json()}catch(e){}
+// ---- Video / Link
+function resetSrc(){if(objU){URL.revokeObjectURL(objU);objU=null}clearInterval(dT);dlid=null;vid=null;vf=null;srcReady=false;dur=0;$('vmsg').textContent='';$('dlw').classList.add('hide');$('der').textContent=''}
+function setSrc(u){const p=$('pv');p.src=u;p.classList.remove('hide');p.load()}
+$('vf').onchange=e=>{const f=e.target.files[0]||null;if(!f)return;resetSrc();vf=f;vid=rid();srcReady=true;$('dropt').textContent='✔ '+f.name;objU=URL.createObjectURL(f);setSrc(objU);
+upP=upload(f,vid,pr=>{if(!vf||vf!==f)return;$('vmsg').textContent=pr<1?'📤 Video ဖိုင်တင်နေ '+Math.round(pr*100)+'%':''});upP.catch(()=>{});upd()};
+$('pst').onclick=async()=>{try{$('lk').value=await navigator.clipboard.readText()}catch(e){$('lk').focus();alert('Paste မရပါ — Link ကို ကြာကြာဖိပြီး Paste လုပ်ပါ')}};
+$('dlb').onclick=async()=>{const u=$('lk').value;if(!/https?:\/\//i.test(u)){alert('Link မမှန်ပါ');return}
+const ckf=$('ck').files[0];if(ckf){const cf=new FormData();cf.append('f',ckf);try{await fetch('/api/cookies',{method:'POST',body:cf})}catch(e){}}
+const fd=new FormData();fd.append('url',u);let j={};try{j=await(await fetch('/api/dl',{method:'POST',body:fd})).json()}catch(e){}
 if(!j.id){alert(j.msg||'Link မမှန်ပါ');return}
-dlid=j.id;vurl=null;vid=null;upP=null;$('dv').removeAttribute('src');$('dv').classList.add('hide');$('dvn').classList.add('hide');$('n2').disabled=true;$('der').textContent='';$('dpb').style.width='0';$('dpct').textContent='0%';
-show(2);pollDl()}
-else{dlid=null;vid=rid();vurl=URL.createObjectURL(vf);
-upP=upload(vf,vid,pr=>{$('upn').textContent=pr<1?'📤 Video ဖိုင်တင်နေ '+Math.round(pr*100)+'%':''});upP.catch(()=>{});
-setSv(vurl);show(3)}};
+resetSrc();$('pv').pause();$('pv').classList.add('hide');$('dropt').textContent='Video ဖိုင် ရွေးပါ';$('vf').value='';
+dlid=j.id;$('dlw').classList.remove('hide');$('dpb').style.width='0';$('dtx').textContent='ဒေါင်းနေပါတယ်… 0%';upd();pollDl()};
 function pollDl(){clearInterval(dT);const id=dlid;dT=setInterval(async()=>{if(id!=dlid){clearInterval(dT);return}
 let s;try{s=await(await fetch('/api/dlst/'+id)).json()}catch(e){return}
-const p=Math.round((s.f||0)*100);$('dpct').textContent=p+'%';$('dpb').style.width=p+'%';
-$('dtx').textContent=s.state=='done'?'ဒေါင်းပြီးပါပြီ ✔':s.state=='err'?'ဒေါင်းမရပါ':(s.d||'ဒေါင်းနေပါတယ်…');
-const b=$('dsp');b.className='big'+(s.state=='done'?' fin':s.state=='err'?' bad':'');b.textContent=s.state=='done'?'✔':s.state=='err'?'✖':'';
-if(s.state=='done'){clearInterval(dT);vurl='/api/dlv/'+id;const v=$('dv');v.src=vurl;v.classList.remove('hide');$('dvn').classList.remove('hide');$('n2').disabled=false}
+const p=Math.round((s.f||0)*100);$('dpb').style.width=p+'%';
+$('dtx').textContent=s.state=='done'?'ဒေါင်းပြီးပါပြီ ✔':s.state=='err'?'ဒေါင်းမရပါ':'ဒေါင်းနေပါတယ်… '+p+'% '+(s.d||'');
+if(s.state=='done'){clearInterval(dT);srcReady=true;setSrc('/api/dlv/'+id);upd()}
 if(s.state=='err'){clearInterval(dT);$('der').textContent=s.msg||''}},1000)}
-$('n2').onclick=()=>{$('dv').pause();setSv(vurl);show(3)};
 
-// ---- အဆင့် ၃ : စာတန်း + Blur editor
-function paint(){const r=$('stage').getBoundingClientRect();if(!r.width)return;const b=ST.bl,s=ST.sub,z=$('bz'),t=$('sb');
+// ---- Preview (output frame) + crop editor
+const BG=document.createElement('canvas');
+function outAR(){const p=$('pv');let w=p.videoWidth||16,h=p.videoHeight||9;if(ST.crop.on){w*=ST.crop.w;h*=ST.crop.h}
+if(ST.size=='orig')return w/h;const a=ST.size.split(':');return a[0]/a[1]}
+function outDims(){const ar=outAR(),Q=ST.q;let W,H;if(ar>=1){H=Q;W=Math.round(Q*ar)}else{W=Q;H=Math.round(Q/ar)}return [W-W%2,H-H%2]}
+function drawOut(cv,W,H){W=Math.round(W);H=Math.round(H);if(cv.width!=W||cv.height!=H){cv.width=W;cv.height=H}
+const x=cv.getContext('2d'),p=$('pv'),vw=p.videoWidth,vh=p.videoHeight;x.fillStyle='#000';x.fillRect(0,0,W,H);if(!vw||p.readyState<2)return;
+const k=ST.crop.on?ST.crop:{x:0,y:0,w:1,h:1},sx=k.x*vw,sy=k.y*vh,sw=k.w*vw,sh=k.h*vh,s=Math.min(W/sw,H/sh),dw=sw*s,dh=sh*s;
+if(ST.bgb&&(Math.abs(dw-W)>1||Math.abs(dh-H)>1)){BG.width=Math.max(2,Math.round(W/14));BG.height=Math.max(2,Math.round(H/14));const s2=Math.max(BG.width/sw,BG.height/sh);
+BG.getContext('2d').drawImage(p,sx,sy,sw,sh,(BG.width-sw*s2)/2,(BG.height-sh*s2)/2,sw*s2,sh*s2);x.imageSmoothingEnabled=true;x.drawImage(BG,0,0,W,H)}
+x.drawImage(p,sx,sy,sw,sh,(W-dw)/2,(H-dh)/2,dw,dh)}
+function paint(){const p=$('pv'),vw=p.videoWidth;
+if(vw){$('stage').style.aspectRatio=String(outAR());const d=outDims();$('osz').textContent='Output: '+d[0]+' × '+d[1]}
+const r=$('stage').getBoundingClientRect();
+if(r.width){const b=ST.bl,s=ST.sub,z=$('bz'),t=$('sb');
 z.style.display=b.on?'block':'none';z.style.left=b.x*100+'%';z.style.top=b.y*100+'%';z.style.width=b.w*100+'%';z.style.height=b.h*100+'%';
 const bp='blur('+(b.s*r.width/720)+'px)';z.style.backdropFilter=bp;z.style.webkitBackdropFilter=bp;
-t.style.display=s.on?'block':'none';t.style.left=s.x*100+'%';t.style.top=s.y*100+'%';t.style.fontSize=(s.size*r.height)+'px';t.style.color=s.color}
+t.style.display=s.on?'block':'none';t.style.left=s.x*100+'%';t.style.top=s.y*100+'%';t.style.fontSize=(s.size*r.height)+'px';t.style.color=s.color;
+drawOut($('cv'),r.width,r.height)}
+if(vw){$('cstage').style.aspectRatio=String(vw/p.videoHeight)}
+const r2=$('cstage').getBoundingClientRect();
+if(r2.width&&vw){const cv=$('cv2'),W=Math.round(r2.width),H=Math.round(r2.height);if(cv.width!=W||cv.height!=H){cv.width=W;cv.height=H}
+const x=cv.getContext('2d');x.fillStyle='#000';x.fillRect(0,0,W,H);if(p.readyState>=2)x.drawImage(p,0,0,W,H);
+const k=ST.crop,z=$('cz');z.style.left=k.x*100+'%';z.style.top=k.y*100+'%';z.style.width=k.w*100+'%';z.style.height=k.h*100+'%'}}
 window.addEventListener('resize',paint);
-function bindDrag(el,start,move){el.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();el.setPointerCapture(e.pointerId);
-const r=$('stage').getBoundingClientRect(),sx=e.clientX,sy=e.clientY,o=start();
+function loop(){const p=$('pv');if(p.paused||p.ended)return;paint();requestAnimationFrame(loop)}
+(function(){const p=$('pv');p.addEventListener('loadedmetadata',()=>{dur=p.duration||0;upd();paint()});
+['loadeddata','seeked','timeupdate'].forEach(e=>p.addEventListener(e,paint));p.addEventListener('play',loop)})();
+function drag(el,stage,start,move){el.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();el.setPointerCapture(e.pointerId);
+const r=stage.getBoundingClientRect(),sx=e.clientX,sy=e.clientY,o=start();
 const mv=ev=>move(o,(ev.clientX-sx)/r.width,(ev.clientY-sy)/r.height);
 const up=()=>{el.removeEventListener('pointermove',mv);el.removeEventListener('pointerup',up);el.removeEventListener('pointercancel',up)};
 el.addEventListener('pointermove',mv);el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up)})}
-bindDrag($('bz'),()=>({x:ST.bl.x,y:ST.bl.y}),(o,dx,dy)=>{ST.bl.x=c(o.x+dx,0,1-ST.bl.w);ST.bl.y=c(o.y+dy,0,1-ST.bl.h);paint()});
-bindDrag($('bh'),()=>({w:ST.bl.w,h:ST.bl.h}),(o,dx,dy)=>{ST.bl.w=c(o.w+dx,.05,1-ST.bl.x);ST.bl.h=c(o.h+dy,.03,1-ST.bl.y);paint()});
-bindDrag($('sb'),()=>({x:ST.sub.x,y:ST.sub.y}),(o,dx,dy)=>{ST.sub.x=c(o.x+dx,0,1);ST.sub.y=c(o.y+dy,0,1);paint()});
-$('so').onchange=e=>{ST.sub.on=e.target.checked;paint()};
+const S2=$('stage'),CS=$('cstage'),MINC=.1;
+drag($('bz'),S2,()=>({x:ST.bl.x,y:ST.bl.y}),(o,dx,dy)=>{ST.bl.x=c(o.x+dx,0,1-ST.bl.w);ST.bl.y=c(o.y+dy,0,1-ST.bl.h);paint()});
+drag($('bh'),S2,()=>({w:ST.bl.w,h:ST.bl.h}),(o,dx,dy)=>{ST.bl.w=c(o.w+dx,.05,1-ST.bl.x);ST.bl.h=c(o.h+dy,.03,1-ST.bl.y);paint()});
+drag($('sb'),S2,()=>({x:ST.sub.x,y:ST.sub.y}),(o,dx,dy)=>{ST.sub.x=c(o.x+dx,0,1);ST.sub.y=c(o.y+dy,0,1);paint()});
+drag($('cz'),CS,()=>({x:ST.crop.x,y:ST.crop.y}),(o,dx,dy)=>{ST.crop.x=c(o.x+dx,0,1-ST.crop.w);ST.crop.y=c(o.y+dy,0,1-ST.crop.h);paint()});
+drag($('ch2'),CS,()=>({w:ST.crop.w,h:ST.crop.h}),(o,dx,dy)=>{ST.crop.w=c(o.w+dx,MINC,1-ST.crop.x);ST.crop.h=c(o.h+dy,MINC,1-ST.crop.y);paint()});
+drag($('ch1'),CS,()=>({x:ST.crop.x,y:ST.crop.y,w:ST.crop.w,h:ST.crop.h}),(o,dx,dy)=>{const nx=c(o.x+dx,0,o.x+o.w-MINC),ny=c(o.y+dy,0,o.y+o.h-MINC);ST.crop.x=nx;ST.crop.y=ny;ST.crop.w=o.w+(o.x-nx);ST.crop.h=o.h+(o.y-ny);paint()});
+
+// ---- controls
+function chips(name,cb){const L=document.querySelectorAll('input[name='+name+']');L.forEach(r=>r.onchange=()=>{L.forEach(x=>x.parentElement.classList.toggle('on',x.checked));cb(r.value)})}
+chips('sz',v=>{ST.size=v;paint()});chips('ql',v=>{ST.q=+v;paint()});
+$('t-cr').onchange=e=>{ST.crop.on=e.target.checked;$('cpane').classList.toggle('hide',!ST.crop.on);setTimeout(paint,30)};
+$('t-sub').onchange=e=>{ST.sub.on=e.target.checked;$('subctl').classList.toggle('hide',!ST.sub.on);paint()};
+$('t-bl').onchange=e=>{ST.bl.on=e.target.checked;$('blctl').classList.toggle('hide',!ST.bl.on);paint()};
+$('t-bg').onchange=e=>{ST.bgb=e.target.checked;paint()};
 $('sc').oninput=e=>{ST.sub.color=e.target.value;paint()};
 $('ss').oninput=e=>{ST.sub.size=e.target.value/1000;paint()};
-$('bo').onchange=e=>{ST.bl.on=e.target.checked;paint()};
 $('bs').oninput=e=>{ST.bl.s=+e.target.value;paint()};
-$('pp').onclick=()=>{const v=$('sv');v.paused?v.play():v.pause()};
-$('b3').onclick=()=>show(mode=='link'?2:1);
-$('n3').onclick=()=>show(4);
-
-// ---- အဆင့် ၄ : mode  /  အဆင့် ၅ : voice
+$('pp').onclick=()=>{const p=$('pv');if(!p.src)return;p.paused?p.play():p.pause()};
 const curMd=()=>document.querySelector('input[name=md]:checked').value;
-function setVoiceUI(){const d=curMd()=='dubbing';$('v2w').classList.toggle('hide',!d);$('v1t').textContent=d?'🎤 Voice 1 (မဖြစ်မနေလို)':'🎤 နမူနာအသံ (၁ ခု)'}
+function setVoiceUI(){const d=curMd()=='dubbing';$('v2w').classList.toggle('hide',!d);$('v1t').textContent=d?'🎤 Voice 1 (မဖြစ်မနေလို)':'🎤 အသံနမူနာ ထည့်ပါ'}
 document.querySelectorAll('input[name=md]').forEach(r=>r.onchange=setVoiceUI);setVoiceUI();
-$('b4').onclick=()=>show(3);
-$('n4').onclick=()=>{setVoiceUI();show(5)};
-$('af').onchange=e=>{af=e.target.files[0]||null;if(af){$('ap').src=URL.createObjectURL(af);$('ap').classList.remove('hide')}$('go').disabled=!af};
+$('af').onchange=e=>{af=e.target.files[0]||null;if(af){$('ap').src=URL.createObjectURL(af);$('ap').classList.remove('hide')}$('spw').classList.toggle('hide',!af);upd()};
 $('af2').onchange=e=>{af2=e.target.files[0]||null;if(af2){$('ap2').src=URL.createObjectURL(af2);$('ap2').classList.remove('hide')}};
-$('b5').onclick=()=>show(4);
+$('sp').oninput=()=>{$('spv').textContent=(+$('sp').value).toFixed(2)+'x'};
 
-// ---- အဆင့် ၅ → ၆  (လက်ရှိတန်ဖိုးတွေကို ကြိုယူထားမယ် — နောက်တစ်ပုဒ် ထပ်စလည်း မရောအောင်)
-$('go').onclick=async()=>{const M=mode,V=vf,L=$('lk').value.trim(),lang=$('lang').value,steps=$('q').value,md=curMd();
-const VID=vid,DLID=dlid,UPP=upP,AF=af,AF2=af2,STY=JSON.stringify(ST);
+// ---- စတင်မည်
+$('go').onclick=async()=>{const V=vf,DL=dlid,L=$('lk').value.trim(),lang=$('lang').value,steps=$('q').value,md=curMd(),spd=$('sp').value;
+const VID=vid,UPP=upP,AF=af,AF2=af2,STY=JSON.stringify({sub:ST.sub,bl:ST.bl,bgb:ST.bgb,size:ST.size,q:ST.q,crop:ST.crop});
+const isFile=!!V;
 $('go').disabled=true;let started=false,J=null;
-try{const f0=new FormData();f0.append('name',M=='file'?V.name:L);const j0=await(await fetch('/api/new',{method:'POST',body:f0})).json();J=j0.id;if(!J)throw new Error(j0.msg||'စတင်မရပါ');
-started=true;watching=J;show(6);poll();
+try{const f0=new FormData();f0.append('name',isFile?V.name:L);const j0=await(await fetch('/api/new',{method:'POST',body:f0})).json();J=j0.id;if(!J)throw new Error(j0.msg||'စတင်မရပါ');
+started=true;watching=J;show('job');poll();
 const o1=rid();const a1=upload(AF,o1);a1.catch(()=>{});let o2='',a2=null;if(md=='dubbing'&&AF2){o2=rid();a2=upload(AF2,o2);a2.catch(()=>{})}
-if(M=='file')await UPP;await a1;if(a2)await a2;
-const fd=new FormData();fd.append('jid',J);fd.append('vid',M=='file'?VID:'');fd.append('dlid',M=='link'?DLID:'');fd.append('voice',o1);fd.append('voice2',o2);
-fd.append('lang',lang);fd.append('steps',steps);fd.append('mode',md);fd.append('style',STY);
+if(isFile)await UPP;await a1;if(a2)await a2;
+const fd=new FormData();fd.append('jid',J);fd.append('vid',isFile?VID:'');fd.append('dlid',isFile?'':DL);fd.append('voice',o1);fd.append('voice2',o2);
+fd.append('lang',lang);fd.append('steps',steps);fd.append('mode',md);fd.append('style',STY);fd.append('spd',spd);
 const j=await(await fetch('/api/start',{method:'POST',body:fd})).json();if(!j.ok)throw new Error(j.msg||'စတင်မရပါ');refreshMe();poll()
 }catch(e){const m=String((e&&e.message)||e);if(started){const f=new FormData();f.append('msg',m);fetch('/api/fail/'+J,{method:'POST',body:f})}else alert(m)}
-$('go').disabled=!af};
+upd()};
 
-// ---- အဆင့် ၆ : progress
+// ---- progress
 function paintJob(j){
 const ico={wait:'○',run:'<i class="sp"></i>',done:'✔',err:'✖'},done=j.status=='done',bad=j.status=='err';
 $('jn').textContent=j.name;
@@ -833,18 +935,18 @@ $('el').textContent='⏱ '+mm(j.el);$('er').textContent=j.err||'';
 $('hb').textContent=(done||bad)?'':(j.ago>150?'🟡 ကြာနေပေမယ့် Server အလုပ်လုပ်နေဆဲပါ — နောက်ဆုံး update '+Math.round(j.ago)+' စက္ကန့်':'🟢 Server အလုပ်လုပ်နေပါတယ်');
 document.title=(done?'✔ ':j.pct+'% ')+'Auto Movie Recap'}
 async function poll(){if(!watching)return;let j;try{j=await(await fetch('/api/job/'+watching)).json()}catch(e){return}
-if(j.msg){watching=null;if(cur==6)show(1);return}
+if(j.msg){watching=null;if(view=='job')show('main');return}
 if(j.status!='run'&&!seen[j.id]){seen[j.id]=1;refreshMe()}
-if(cur!=6)return;paintJob(j);if(j.status=='done')openResult(j)}
+if(view!='job')return;paintJob(j);if(j.status=='done')openResult(j)}
 
-// ---- အဆင့် ၇ : ရလဒ်
+// ---- ရလဒ်
 function setLink(){if(!curId)return;const n=$('fn').value.trim().replace(/[\\\/:*?"<>|]/g,'');$('dl').href='/api/result/'+curId+'?dl=1'+(n?'&name='+encodeURIComponent(n):'')}
 $('fn').oninput=setLink;
-function openResult(j){curId=j.id;$('rn').textContent=j.name;$('rv').src='/api/result/'+j.id;$('fn').value='';$('fn').placeholder=String(j.name).replace(/\.[^.]+$/,'').slice(0,60);setLink();show(7)}
+function openResult(j){curId=j.id;$('rn').textContent=j.name;$('rv').src='/api/result/'+j.id;$('fn').value='';$('fn').placeholder=String(j.name).replace(/\.[^.]+$/,'').slice(0,60);setLink();show('res')}
 
 // ---- History
 async function loadHist(){let l;try{l=await(await fetch('/api/jobs')).json()}catch(e){return}
-if(cur!=8)return;window._hl=l;
+if(view!='hist')return;window._hl=l;
 $('hl').innerHTML=l.length?l.map(j=>{
 const i=j.steps.findIndex(x=>x.s=='run');
 const stt=j.status=='done'?'✅ ပြီးပါပြီ':j.status=='err'?'❌ မအောင်မြင်ပါ':'⏳ လုပ်နေဆဲ — '+j.pct+'%'+(i>=0?' · '+STEPS[i]:'');
@@ -854,16 +956,19 @@ const btn=j.status=='done'?'<div class="row"><button class="btn" data-v="'+j.id+
 return '<div class="hi"><b>'+esc(j.name)+'</b><div class="note">'+stt+' · ⏱ '+mm(j.el)+'</div>'+bar+err+btn+'</div>'}).join(''):'<div class="note">ထုတ်ထားတဲ့ video မရှိသေးပါ</div>'}
 $('hl').onclick=e=>{const v=e.target.closest('[data-v]'),w=e.target.closest('[data-w]');
 if(v){const id=v.dataset.v;const it=(window._hl||[]).find(x=>x.id==id);openResult({id:id,name:it?it.name:'video'})}
-if(w){watching=w.dataset.w;show(6);poll()}};
+if(w){watching=w.dataset.w;show('job');poll()}};
 
-function newVideo(){vf=null;af=null;af2=null;dlid=null;vurl=null;vid=null;upP=null;watching=null;clearInterval(dT);
-['vf','af','af2','lk'].forEach(i=>$(i).value='');['ap','ap2','dv','sv','rv'].forEach(i=>{$(i).removeAttribute('src')});['ap','ap2'].forEach(i=>$(i).classList.add('hide'));
-$('go').disabled=true;setVoiceUI();$('upn').textContent='';document.title='Auto Movie Recap';setMode('link');show(1)}
+function newVideo(){resetSrc();af=null;af2=null;watching=null;
+['vf','af','af2','lk','ck'].forEach(i=>$(i).value='');
+['ap','ap2'].forEach(i=>{$(i).removeAttribute('src');$(i).classList.add('hide')});
+const p=$('pv');p.pause();p.removeAttribute('src');p.load();p.classList.add('hide');$('rv').removeAttribute('src');
+$('dropt').textContent='Video ဖိုင် ရွေးပါ';$('spw').classList.add('hide');$('sp').value=1;$('spv').textContent='1.00x';
+document.title='Auto Movie Recap';upd();setTab(1);show('main')}
 $('nx').onclick=$('nx2').onclick=$('hb8').onclick=$('newbtn').onclick=newVideo;
 
-refreshMe();show(1);
-fetch('/api/jobs').then(r=>r.json()).then(l=>{if(l.some(j=>j.status=='run'))show(8)}).catch(()=>{});
-setInterval(()=>{poll();if(cur==8)loadHist()},2000);
+refreshMe();show('main');upd();
+fetch('/api/jobs').then(r=>r.json()).then(l=>{if(l.some(j=>j.status=='run'))show('hist')}).catch(()=>{});
+setInterval(()=>{poll();if(view=='hist')loadHist()},2000);
 </script></body></html>'''
 
 app = FastAPI()
@@ -924,7 +1029,7 @@ def up(chunk: UploadFile, id: str = Form(""), idx: int = Form(0), n: int = Form(
 
 @app.post("/api/start")
 def start(jid: str = Form(""), vid: str = Form(""), dlid: str = Form(""), voice: str = Form(""), voice2: str = Form(""),
-          lang: str = Form("auto"), steps: int = Form(6), mode: str = Form("recap"), style: str = Form("{}")):
+          lang: str = Form("auto"), steps: int = Form(6), mode: str = Form("recap"), style: str = Form("{}"), spd: float = Form(1.0)):
     if jid not in JOBS: return JSONResponse({"msg": "job မတွေ့ပါ"}, status_code=400)
     if dlid:
         if dlid not in DL: return JSONResponse({"msg": "ဒေါင်းထားတဲ့ video မတွေ့ပါ"}, status_code=400)
@@ -939,7 +1044,7 @@ def start(jid: str = Form(""), vid: str = Form(""), dlid: str = Form(""), voice:
     u = srv(action="use", id=UID)      # ထုတ်ခွင့် ၁ ပုဒ် နှုတ်
     if not u.get("ok"): return JSONResponse({"msg": u.get("msg", "video ထုတ်ခွင့် မကျန်တော့ပါ")}, status_code=402)
     if u.get("ticket"): JOBS[jid]["ticket"] = u["ticket"]
-    threading.Thread(target=run_job, args=(jid, vid, dlid, voice, voice2, lang, max(3, min(12, steps)), mode, style), daemon=True).start()
+    threading.Thread(target=run_job, args=(jid, vid, dlid, voice, voice2, lang, max(3, min(12, steps)), mode, style, max(0.6, min(1.6, spd))), daemon=True).start()
     return {"ok": True}
 
 @app.post("/api/fail/{jid}")
