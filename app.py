@@ -1090,5 +1090,42 @@ _SRV = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="
 threading.Thread(target=_SRV.run, daemon=True).start()
 time.sleep(3)
 from google.colab import output
-print("✅ Website ကို အောက်မှာ ဒီ Colab ထဲမှာပဲ သုံးပါ (Tab မပြောင်းပါနဲ့၊ Colab tab ကို မပိတ်ပါနဲ့)")
-output.serve_kernel_port_as_iframe(8000, height="1100")
+from IPython.display import display, HTML
+
+def get_site():
+    # 1) Colab ရဲ့ ကိုယ်ပိုင် proxy link
+    try:
+        u = output.eval_js("google.colab.kernel.proxyPort(8000, {'cache': true})", timeout_sec=20)
+        if u and str(u).startswith("http"): return str(u), "colab"
+    except Exception as e:
+        print("Colab link မရပါ:", str(e)[:100])
+    # 2) မရရင် cloudflared tunnel နဲ့ public link ယူ (ဖုန်း view မှာလည်း အလုပ်လုပ်)
+    try:
+        exe = "/content/cloudflared"
+        if not os.path.exists(exe):
+            r = requests.get("https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64", timeout=180)
+            r.raise_for_status(); open(exe, "wb").write(r.content); os.chmod(exe, 0o755)
+        lg = open("/content/cf.log", "w")
+        subprocess.Popen([exe, "tunnel", "--url", "http://localhost:8000", "--no-autoupdate"], stdout=lg, stderr=lg)
+        t0 = time.time()
+        while time.time() - t0 < 60:
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open("/content/cf.log").read())
+            if m: return m.group(0), "cf"
+            time.sleep(1)
+    except Exception as e:
+        print("tunnel link မရပါ:", str(e)[:100])
+    return "", ""
+
+site, kind = get_site()
+print("✅ Website အဆင်သင့်ပါ — Colab tab ကို မပိတ်ပါနဲ့")
+if site:
+    print("🔗 Link:", site)
+    display(HTML('<a href="%s" target="_blank" style="display:block;text-align:center;background:#e11d2e;color:#fff;font:700 18px sans-serif;padding:16px;border-radius:12px;text-decoration:none;margin:10px 0">🌐 Website ကို Tab အသစ်မှာ ဖွင့်မည်</a>' % site))
+    if kind == "colab":
+        try: output.serve_kernel_port_as_iframe(8000, height="900")
+        except Exception as e: print("iframe မပေါ်ပါ:", str(e)[:100])
+    else:
+        display(HTML('<iframe src="%s" style="width:100%%;height:900px;border:1px solid #ddd;border-radius:12px;background:#fff"></iframe>' % site))
+    print("💡 အောက်မှာ website မပေါ်ရင် Chrome ⋮ menu → \"Desktop site\" ကို အမှန်ခြစ်ပြီး Colab ကို refresh လုပ်ပါ (ဖုန်း view က iframe မပြတတ်ပါ)။ အပေါ်က ခလုတ်/link ကတော့ အမြဲရပါတယ်။")
+else:
+    print("❌ Website link မရပါ — cell ကို ပြန် run ပါ၊ မရသေးရင် output ကို screenshot ပြပါ")
