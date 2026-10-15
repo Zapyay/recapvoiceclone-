@@ -1090,7 +1090,7 @@ _SRV = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="
 threading.Thread(target=_SRV.run, daemon=True).start()
 time.sleep(3)
 from google.colab import output
-from IPython.display import display, HTML
+from IPython.display import display, HTML as IPY_HTML   # (HTML နာမည်က website စာမျက်နှာအတွက်ပါ — မထိပါနဲ့)
 
 def start_tunnel():
     # website ကို cell ထဲမှာ ပြဖို့ public address ယူ (JS မလိုတဲ့နည်း — ဖုန်း view မှာလည်း အလုပ်လုပ်)
@@ -1120,7 +1120,7 @@ def start_tunnel():
 site = start_tunnel()
 if site:
     print("✅ Website အောက်မှာ ပေါ်ပါမယ် — Colab tab ကို မပိတ်ပါနဲ့")
-    display(HTML('<iframe src="%s" allow="clipboard-read; clipboard-write; fullscreen" style="width:100%%;height:1100px;border:0;background:#fff"></iframe>' % site))
+    display(IPY_HTML('<iframe src="%s" allow="clipboard-read; clipboard-write; fullscreen" style="width:100%%;height:1100px;border:0;background:#fff"></iframe>' % site))
 else:
     print("⚠️ tunnel မရလို့ Colab နည်းနဲ့ ပြပါတယ်")
     try: output.serve_kernel_port_as_iframe(8000, height="1100")
