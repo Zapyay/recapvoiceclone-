@@ -251,16 +251,42 @@ def ass_time(t):
     h, cs = divmod(cs, 360000); m, cs = divmod(cs, 6000); s, cs = divmod(cs, 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
+def kara(ls, D):
+    # စာကြောင်းတွေကို စကားလုံးအုပ်စုခွဲ → ပြောနေတဲ့အတိုင်း အရောင်ပြောင်း (\k)
+    toks = []
+    for ln in ls:
+        row = []
+        for w in re.findall(r"\S+\s*", ln):
+            cl = clusters(w)
+            if len(cl) > 7: row += ["".join(cl[i:i + 5]) for i in range(0, len(cl), 5)]
+            else: row.append(w)
+        toks.append(row)
+    n = max(1, sum(len(clusters(t)) for r in toks for t in r)); out = []
+    for r in toks:
+        out.append("".join("{\\k%d}%s" % (max(1, round(D * 92 * len(clusters(t)) / n)), t) for t in r))
+    return "\\N".join(out)
+
 def build_ass(cues, W, H, sub):
     fs = max(10, int(sub["size"] * H)); x = int(sub["x"] * W); y = int(sub["y"] * H)
     ol = max(1, round(fs / 18))
+    nc = ass_color(sub.get("color")); hl_on = bool(sub.get("hlOn", True))
+    hc = ass_color(sub.get("hl") or "#22d3ee") if hl_on else nc
     head = ("[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\nWrapStyle: 2\n\n[V4+ Styles]\n"
             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-            "Style: Default,Noto Sans Myanmar,%d,%s,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,%d,1,5,10,10,10,1\n\n"
-            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n") % (W, H, fs, ass_color(sub.get("color")), ol)
+            "Style: Default,Noto Sans Myanmar,%d,%s,%s,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,%d,1,5,10,10,10,1\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n") % (W, H, fs, hc, nc, ol)
     lines = [head]
+    box = bool(sub.get("box", True))
+    try: bo = max(0.0, min(100.0, float(sub.get("bo", 60)))); bhs = max(0.4, min(3.0, float(sub.get("bh", 1.0))))
+    except Exception: bo, bhs = 60.0, 1.0
+    bcol = ass_color(sub.get("bc") or "#000000")[4:]; al = int(round((100 - bo) / 100 * 255))
+    hh = fs * 2.4 * bhs; y0 = int(max(0, y - hh / 2)); y1 = int(min(H, y + hh / 2)); x0 = int(W * 0.02); x1 = W - x0
     for a, b, ls in cues:
-        lines.append(f"Dialogue: 0,{ass_time(a)},{ass_time(b)},Default,,0,0,0,,{{\\an5\\pos({x},{y})}}" + "\\N".join(ls) + "\n")
+        if box and bo > 0:
+            lines.append(f"Dialogue: 0,{ass_time(a)},{ass_time(b)},Default,,0,0,0,,{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H{bcol}&\\1a&H{al:02X}&\\p1}}m {x0} {y0} l {x1} {y0} l {x1} {y1} l {x0} {y1}{{\\p0}}\n")
+        ls = [l.replace("{", "").replace("}", "") for l in ls]
+        txt = kara(ls, b - a) if hl_on else "\\N".join(ls)
+        lines.append(f"Dialogue: 1,{ass_time(a)},{ass_time(b)},Default,,0,0,0,,{{\\an5\\pos({x},{y})}}" + txt + "\n")
     return "".join(lines)
 
 # ---- Link ကနေ video ဒေါင်း (TikTok / YouTube / Facebook / Rednote …)
@@ -415,6 +441,8 @@ RECAP_HINT = "- ဒီ video ကို ဇာတ်လမ်းအကျဉ်�
 DUB_HINT = "- ဒီ video မှာ လူနှစ်ယောက် စကားပြောနေတာပါ ('spk' က စကားပြောသူ နံပါတ်)။ အပြန်အလှန် စကားပြောသလို စကားပြော ပုံစံနဲ့ ရေးပါ။"
 SHORT = "အောက်က မြန်မာစာကို အဓိပ္ပာယ်မပျက်ဘဲ {N} စာလုံးခန့်အထိ ချုံ့ပါ။ ရိုးရိုးစကားလုံး၊ စာလုံးပေါင်းမှန်၊ Unicode၊ အဆုံးမှာ ။ ထည့်ပါ။ string တစ်ခုပါတဲ့ JSON array ပြန်ပါ။\n"
 
+LONGP = "အောက်က မြန်မာစာ narration ကို အဓိပ္ပာယ်မပျက်၊ ဇာတ်ကြောင်းနဲ့ ဆက်စပ်အောင် {N} စာလုံးခန့်အထိ ပိုရှည်အောင် ဖြည့်ရေးပါ (မမြင်ရတာ မဖန်တီးနဲ့၊ အသေးစိတ် ရှင်းပြတာ၊ ခံစားချက် ဖြည့်တာသာ)။ ရိုးရိုးစကားလုံး၊ စာလုံးပေါင်းမှန်၊ Unicode၊ အဆုံးမှာ ။ ထည့်ပါ။ string တစ်ခုပါတဲ့ JSON array ပြန်ပါ။\n"
+
 def as_list(data):
     if isinstance(data, dict): data = next((v for v in data.values() if isinstance(v, list)), [])
     return [(x.get("text", "") if isinstance(x, dict) else str(x)) for x in data]
@@ -440,6 +468,10 @@ def shorten(text, n):
     return fix_my(o[0]) if o and o[0].strip() else text
 
 
+def lengthen(text, n):
+    o = as_list(jparse(gcall([LONGP.replace("{N}", str(int(n))) + json.dumps([text], ensure_ascii=False)], temp=0.4)))
+    return fix_my(o[0]) if o and o[0].strip() else text
+
 # ---- Script Recap: Gemini က video ကို ကြည့်ပြီး စကားမလွတ်အောင် window တိုင်း narration ရေး
 SCRIPT_PROMPT = """သင်ဟာ မြန်မာစာ ကျွမ်းကျင်တဲ့ video recap narrator ပါ။ တွဲပါလာတဲ့ video အပိုင်းကို (ပုံရော အသံရော) ကြည့်ပြီး video ရဲ့ ပုံစံ (အမျိုးအစား၊ ခံစားချက်၊ ဇာတ်ကောင်များ၊ ပြောပုံဆိုပုံ) ကို လေ့လာပါ။ ပြီးရင် INPUT ထဲက window တစ်ခုချင်းအတွက် narrator စကားကို မြန်မာလို ရေးပါ။
 - window တိုင်းမှာ စကားပါရမယ်၊ ဘယ် window မှ ဗလာမထားရပါ။ video မှာ စကားပြောနည်းနေတာ၊ တိတ်နေတာ ဖြစ်ရင်တောင် ပုံထဲမှာ မြင်ရတဲ့ လုပ်ရပ်၊ ဇာတ်ကောင်၊ နေရာ၊ ခံစားချက်၊ အခြေအနေကို ဇာတ်ကြောင်းပြောပြသလို ဖြည့်ရေးပါ။
@@ -452,7 +484,7 @@ SCRIPT_PROMPT = """သင်ဟာ မြန်မာစာ ကျွမ်း�
 - string array တစ်ခုတည်း ပြန်ပါ။ အရေအတွက်၊ အစီအစဉ် INPUT နဲ့ အတိအကျ တူရမယ်။
 """
 
-def script_windows(scenes, wmax=7.0):
+def script_windows(scenes, wmax=5.0):
     # scene အားလုံးကို window တိုတိုခွဲ (စကားမပါတဲ့ နေရာတွေပါ narration ရအောင်)
     out = []
     for x in scenes:
@@ -497,7 +529,7 @@ def script_write(f, wins, cps, dur, prog):
         base = int(math.floor(chunk[0]["a"])) if offs else 0
         items = []
         for k, w in enumerate(chunk):
-            it = {"i": k, "start": round(w["a"] - base, 1), "end": round(w["b"] - base, 1), "chars": int(max(8, (w["b"] - w["a"]) * cps * 0.95))}
+            it = {"i": k, "start": round(w["a"] - base, 1), "end": round(w["b"] - base, 1), "chars": int(max(8, (w["b"] - w["a"]) * cps))}
             if w["src"]: it["speech"] = w["src"]
             items.append(it)
         p = SCRIPT_PROMPT + ("previous: " + json.dumps(prev[-3:], ensure_ascii=False) + "\n" if prev else "") + "INPUT:\n" + json.dumps(items, ensure_ascii=False)
@@ -586,7 +618,8 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
     try:
         try: stl = json.loads(style)
         except Exception: stl = {}
-        sub = {"on": True, "x": .5, "y": .88, "size": .055, "color": "#ffffff", **(stl.get("sub") or {})}
+        sub = {"on": True, "x": .5, "y": .88, "size": .055, "color": "#ffffff", "hlOn": True, "hl": "#22d3ee", "box": True, "bc": "#000000", "bo": 60, "bh": 1.0, **(stl.get("sub") or {})}
+        flip = bool(stl.get("flip"))
         bl = {"on": False, "x": .1, "y": .8, "w": .8, "h": .16, "s": 12, **(stl.get("bl") or {})}
         cl = lambda v, a, b: max(a, min(b, float(v)))
         bgb = bool(stl.get("bgb", True))                       # Blur နောက်ခံ
@@ -668,7 +701,7 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
             gf = None
             try:
                 gf = gem_upload(src, d)
-                script_write(gf, scenes, cps, dur, lambda i, n: P(job, 4, "run", f"{i}/{n}", .1 + .9 * i / n))
+                script_write(gf, scenes, cps * 1.2, dur, lambda i, n: P(job, 4, "run", f"{i}/{n}", .1 + .9 * i / n))
             finally:
                 if gf is not None:
                     try: gc.files.delete(name=gf.name)
@@ -704,15 +737,16 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
             n = max(FPS, math.ceil(dd * FPS)); dd = n / FPS
             need = max(0.3, min(dd * s, T, dur - a))
             sp_ = os.path.join(d, f"seg{i}.mp4")
-            pre = f"{crop_f}setpts=(PTS-STARTPTS)/{s:.5f},fps={FPS},tpad=stop_mode=clone:stop_duration=30,setsar=1"
-            fit = f"scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2"
+            pre = f"{crop_f}{'hflip,' if flip else ''}setpts=(PTS-STARTPTS)/{s:.5f},fps={FPS},tpad=stop_mode=clone:stop_duration=30,setsar=1"
+            shp = ",unsharp=5:5:0.6:5:5:0.0" if max(W / max(1, cw), H / max(1, ch_)) > 1.2 else ""
+            fit = f"scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos{shp}"
             if need_bg:
                 bgf = f"scale={gw}:{gh}:force_original_aspect_ratio=increase,crop={gw}:{gh},gblur=sigma={bsig:.2f},scale={W}:{H}"
                 fc = f"[0:v]{pre},split[a][b];[b]{bgf}[bg];[a]{fit}[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
             else:
                 fc = f"[0:v]{pre},{fit},pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[v]"
             cmd = ["nice", "-n", "19", "ffmpeg", "-y", "-ss", f"{min(a, dur - 0.5):.3f}", "-t", f"{need:.3f}", "-i", src, "-an", "-filter_complex", fc, "-map", "[v]"]
-            sh(cmd + ["-frames:v", str(n), "-c:v", "libx264", "-preset", "superfast", "-crf", "24", "-threads", "1", "-r", str(FPS), sp_])
+            sh(cmd + ["-frames:v", str(n), "-c:v", "libx264", "-preset", "superfast", "-crf", "15", "-threads", "1", "-r", str(FPS), sp_])
             Tn = int(round(n * SR / FPS)); full[i] = np.pad(au, (0, max(0, Tn - len(au))))[:Tn]; segs[i] = sp_; tot[i] = dd
             with lk:
                 cnt["n"] += 1; P(job, 6, "run", f"{cnt['n']}/{N}", cnt["n"] / N)
@@ -730,6 +764,17 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
                     T = b - a
                     au = synth(t, ref, steps, spd, d)
                     L = len(au) / SR
+                    if mode == "script" and T >= 1.5 and L > 0.2:
+                        try:
+                            if L > T * 1.1 and len(t) > 12:
+                                t2 = shorten(t, len(t) * T * 0.97 / L); au2 = synth(t2, ref, steps, spd, d)
+                                if abs(len(au2) / SR - T) < abs(L - T): au, t, L = au2, t2, len(au2) / SR
+                            elif L < T * 0.75:
+                                t2 = lengthen(t, len(t) * T * 0.92 / L); au2 = synth(t2, ref, steps, spd, d)
+                                if abs(len(au2) / SR - T) < abs(L - T): au, t, L = au2, t2, len(au2) / SR
+                        except Exception: pass
+                        if L > T * 1.08:
+                            au = tempo(au, min(1.35, L / T), d); L = len(au) / SR
                     if L > T * 1.5 and len(t) > 25:
                         try:
                             t2 = shorten(t, len(t) * T * 1.2 / L)
@@ -767,7 +812,7 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
                 chain.append(f"{last}split[a][b];[b]crop={bw}:{bh}:{bx}:{by},gblur=sigma={sig:.1f}[c];[a][c]overlay={bx}:{by}[v1]"); last = "[v1]"
             if use_sub and cues:
                 chain.append(f"{last}ass={ap}[vo]"); last = "[vo]"
-            if chain: vc = ["-filter_complex", ";".join(chain), "-map", last, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p"]
+            if chain: vc = ["-filter_complex", ";".join(chain), "-map", last, "-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-pix_fmt", "yuv420p"]
             else: vc = ["-map", "0:v", "-c:v", "copy"]
             return ["ffmpeg", "-y", "-i", vv, "-i", wv] + vc + ["-map", "1:a", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", out]
         cb = lambda f: P(job, 7, "run", "စာတန်း + Blur ထည့်နေ", .05 + .93 * f)
@@ -813,7 +858,7 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 .big.fin{animation:none;border-color:#1a9d5c;display:flex;align-items:center;justify-content:center;color:#1a9d5c;font-size:1.4rem}.big.bad{animation:none;border-color:var(--r);color:var(--r);display:flex;align-items:center;justify-content:center;font-size:1.4rem}
 #pct{font-size:1.9rem;font-weight:800;line-height:1.1}#el{margin-left:auto;font-size:1rem;font-weight:700}
 .bar{height:14px;background:#eee;border-radius:10px;overflow:hidden}.bar i{display:block;height:100%;width:0;border-radius:10px;transition:width .6s;background:var(--r)}
-.hide{display:none!important}pre{white-space:pre-wrap;font-size:.8rem;color:var(--r)}
+.hide{display:none!important}.pv{min-width:46px;text-align:right}#sbx{position:absolute;pointer-events:none;transform:translateY(-50%)}pre{white-space:pre-wrap;font-size:.8rem;color:var(--r)}
 .opt{display:flex;gap:10px;align-items:flex-start;border:1px solid #ddd;border-radius:12px;padding:12px;margin:8px 0;cursor:pointer}.opt input{margin-top:6px;accent-color:var(--r)}
 .ctl{display:flex;align-items:center;gap:10px;margin-top:10px}.ctl label{min-width:92px;font-size:.9rem}.ctl input[type=range]{flex:1;accent-color:var(--r)}.ctl input[type=color]{width:56px;height:36px;border:1px solid #ccc;border-radius:8px;padding:2px;background:#fff}
 .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.top .id{font-weight:800;letter-spacing:.5px;user-select:all}
@@ -860,7 +905,7 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 <div class="note" id="vmsg"></div>
 </div>
 
-<div class="tabs3"><button data-t="1" class="on">ဗီဒီယို</button><button data-t="2">စာတန်း</button><button data-t="3">အသံ</button></div>
+<div class="tabs3"><button data-t="1" class="on">ဗီဒီယို</button><button data-t="2">စာတန်း</button><button data-t="4">Blur</button><button data-t="3">အသံ</button></div>
 
 <div class="card" id="t1">
 <h3 style="margin-top:0">Model</h3>
@@ -879,17 +924,31 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 </div>
 
 <div class="card hide" id="t2">
-<div class="stg" id="stage"><canvas id="cv"></canvas><div id="bz"><div class="hd" id="bh" style="right:-2px;bottom:-2px;border-radius:8px 0 0 0"></div></div><div id="sb">မြန်မာစာတန်း နမူနာ
+<div class="stg" id="stage"><canvas id="cv"></canvas><div id="bz"><div class="hd" id="bh" style="right:-2px;bottom:-2px;border-radius:8px 0 0 0"></div></div><div id="sbx"></div><div id="sb"><span id="sh">မြန်မာစာတန်း</span> နမူနာ
 ဒီနေရာမှာ ပေါ်ပါမယ်</div></div>
 <button class="btn ol" id="pp">▶ / ⏸ Video ဖွင့်ကြည့်</button>
 <div class="note">စာတန်းကို လက်နဲ့ ဆွဲရွှေ့ပါ။ Blur ဘောက်စ်ကို ဆွဲရွှေ့ပါ၊ အောက်ညာထောင့် အနီစတုရန်းကို ဆွဲပြီး အရွယ်စား ပြောင်းပါ။</div>
-<div class="sw" style="margin-top:8px"><span>စာတန်း / အရောင် ချိန်ညှိ</span><input type="checkbox" id="t-sub" checked></div>
-<div id="subctl" class="pane"><div class="ctl"><label>🎨 စာအရောင်</label><input type="color" id="sc" value="#ffffff"></div><div class="ctl"><label>🔠 စာအရွယ်</label><input type="range" id="ss" min="20" max="120" value="55"></div></div>
-<div class="sw"><span>Blur ချိန်ညှိ</span><input type="checkbox" id="t-bl"></div>
-<div id="blctl" class="pane hide"><div class="ctl"><label>💧 Blur အားစိုက်</label><input type="range" id="bs" min="2" max="40" value="12"></div></div>
-<div class="sw"><span>Blur နောက်ခံ</span><input type="checkbox" id="t-bg" checked></div>
-<div id="bgctl" class="pane"><div class="ctl"><label>💧 နောက်ခံ Blur</label><input type="range" id="bgs" min="1" max="40" value="10"></div><div class="note">ဘယ်ဘက် = ဝါးနည်း (ရှင်း)၊ ညာဘက် = ဝါးများ။ Size ရွေးထားလို့ video ရဲ့ ဘေး/အပေါ်အောက်မှာ ပေါ်တဲ့ နောက်ခံကို ပြောင်းပေးတာ။</div></div>
-<div class="note">Blur နောက်ခံ = ရွေးထားတဲ့ Size နဲ့ Video မကိုက်လို့ ကျန်တဲ့နေရာကို Video ကိုယ်တိုင်ကို blur လုပ်ပြီး ဖြည့်ပေးတာ။ ပိတ်ထားရင် အနက်ရောင်ပဲ ဖြည့်မယ်။ စာတန်း/Blur မလိုရင် အပေါ်က ခလုတ်တွေကို ပိတ်ထားပါ။</div>
+<div id="pn-sub">
+<div class="sw" style="margin-top:8px"><span>စာတန်း ထည့်မယ်</span><input type="checkbox" id="t-sub" checked></div>
+<div id="subctl" class="pane">
+<div class="ctl"><label>🎨 စာအရောင်</label><input type="color" id="sc" value="#ffffff"></div>
+<div class="ctl"><label>🔠 စာအရွယ်</label><input type="range" id="ss" min="50" max="200" value="100"><b class="pv" id="ssv">100%</b></div>
+<div class="sw"><span>✨ ပြောနေတဲ့စာလုံး အရောင်ပြောင်း</span><input type="checkbox" id="t-hl" checked></div>
+<div id="hlctl" class="pane"><div class="ctl"><label>🎨 ပြောပြီးစာ အရောင်</label><input type="color" id="hc" value="#22d3ee"></div></div>
+<div class="sw"><span>⬛ စာတန်း အောက်ခံ</span><input type="checkbox" id="t-bx" checked></div>
+<div id="bxctl" class="pane">
+<div class="ctl"><label>🎨 အောက်ခံ အရောင်</label><input type="color" id="bc" value="#000000"></div>
+<div class="ctl"><label>◐ အထူအပါး</label><input type="range" id="sbo" min="0" max="100" value="60"><b class="pv" id="sbov">60%</b></div>
+<div class="ctl"><label>↕ အမြင့်</label><input type="range" id="sbh" min="40" max="250" value="100"><b class="pv" id="sbhv">100%</b></div>
+</div></div>
+</div>
+<div id="pn-blr" class="hide">
+<div class="sw" style="margin-top:8px"><span>စာတန်း Blur (မူရင်းစာတန်း ဖုံးမယ်)</span><input type="checkbox" id="t-bl"></div>
+<div id="blctl" class="pane hide"><div class="ctl"><label>💧 Blur အားစိုက်</label><input type="range" id="bs" min="0" max="100" value="25"><b class="pv" id="bsv">25%</b></div></div>
+<div class="sw"><span>နောက်ခံ Blur</span><input type="checkbox" id="t-bg" checked></div>
+<div id="bgctl" class="pane"><div class="ctl"><label>💧 နောက်ခံ Blur</label><input type="range" id="bgs" min="0" max="100" value="23"><b class="pv" id="bgsv">23%</b></div><div class="note">Size ရွေးထားလို့ video ရဲ့ ဘေး/အပေါ်အောက်မှာ ပေါ်တဲ့ နောက်ခံကို ဝါးတာ။ ပိတ်ထားရင် အနက်ရောင်။</div></div>
+<div class="sw"><span>↔ Video ကို ဘယ်ညာ လှန်မယ်</span><input type="checkbox" id="t-fl"></div>
+</div>
 </div>
 
 <div class="card hide" id="t3">
@@ -924,15 +983,16 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 </main><script>
 const $=i=>document.getElementById(i);
 let vf=null,af=null,af2=null,dlid=null,vid=null,upP=null,srcReady=false,dur=0,objU=null,watching=null,view='main',dT=null,curId=null,seen={},REM=null;
-const ST={sub:{on:true,x:.5,y:.88,size:.055,color:'#ffffff'},bl:{on:false,x:.1,y:.8,w:.8,h:.16,s:12},bgb:true,bgs:10,size:'orig',q:1080,crop:{on:false,x:.1,y:.1,w:.8,h:.8}};
+const ST={sub:{on:true,x:.5,y:.88,size:.055,color:'#ffffff',hlOn:true,hl:'#22d3ee',box:true,bc:'#000000',bo:60,bh:1},flip:false,bl:{on:false,x:.1,y:.8,w:.8,h:.16,s:12},bgb:true,bgs:10,size:'orig',q:1080,crop:{on:false,x:.1,y:.1,w:.8,h:.8}};
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const STEPS=["Video ရယူခြင်း","Video စစ်ဆေးခြင်း","AssemblyAI နဲ့ စကားကို စာထုတ်ခြင်း","နမူနာအသံ ပြင်ဆင်ခြင်း","Gemini နဲ့ မြန်မာလို ဘာသာပြန်ခြင်း","Voice Clone နဲ့ အသံထုတ်ခြင်း","Video ဖြတ်ညှိခြင်း","စာတန်း + Blur ထည့်ပြီး MP4 ထုတ်ခြင်း","ပြီးစီးပါပြီ"];
 const mm=s=>String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0');
 const c=(v,a,b)=>Math.max(a,Math.min(b,v));
+const rgba=(h,a)=>{const n=parseInt(h.slice(1),16);return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')'};
 const rid=()=>Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');
 const MAXS=900;
 function show(v){view=v;['main','job','res','hist'].forEach(n=>$('v-'+n).classList.toggle('hide',n!=v));if(v!='res')$('rv').pause();if(v!='main')$('pv').pause();window.scrollTo(0,0);if(v=='main')setTimeout(paint,80);if(v=='hist')loadHist()}
-function setTab(n){document.querySelectorAll('.tabs3 button').forEach(b=>b.classList.toggle('on',+b.dataset.t==n));[1,2,3].forEach(i=>$('t'+i).classList.toggle('hide',i!=n));setTimeout(paint,60)}
+function setTab(n){document.querySelectorAll('.tabs3 button').forEach(b=>b.classList.toggle('on',+b.dataset.t==n));[1,2,3].forEach(i=>$('t'+i).classList.toggle('hide',i!=(n==4?2:n)));$('pn-sub').classList.toggle('hide',n==4);$('pn-blr').classList.toggle('hide',n!=4);setTimeout(paint,60)}
 document.querySelectorAll('.tabs3 button').forEach(b=>b.onclick=()=>setTab(+b.dataset.t));
 
 // ---- User ID + ထုတ်ခွင့်
@@ -974,20 +1034,20 @@ function outAR(){const p=$('pv');let w=p.videoWidth||16,h=p.videoHeight||9;if(ST
 if(ST.size=='orig')return w/h;const a=ST.size.split(':');return a[0]/a[1]}
 function outDims(){const ar=outAR(),Q=ST.q;let W,H;if(ar>=1){H=Q;W=Math.round(Q*ar)}else{W=Q;H=Math.round(Q/ar)}return [W-W%2,H-H%2]}
 function drawOut(cv,W,H){W=Math.round(W);H=Math.round(H);if(cv.width!=W||cv.height!=H){cv.width=W;cv.height=H}
-const x=cv.getContext('2d'),p=$('pv'),vw=p.videoWidth,vh=p.videoHeight;x.fillStyle='#000';x.fillRect(0,0,W,H);if(!vw||p.readyState<2)return;
+const x=cv.getContext('2d'),p=$('pv'),vw=p.videoWidth,vh=p.videoHeight;x.fillStyle='#000';x.fillRect(0,0,W,H);if(!vw||p.readyState<2)return;x.save();if(ST.flip){x.translate(W,0);x.scale(-1,1)}
 const k=ST.crop.on?ST.crop:{x:0,y:0,w:1,h:1},sx=k.x*vw,sy=k.y*vh,sw=k.w*vw,sh=k.h*vh,s=Math.min(W/sw,H/sh),dw=sw*s,dh=sh*s;
 if(ST.bgb&&(Math.abs(dw-W)>1||Math.abs(dh-H)>1)){const bw=Math.max(2,Math.round(W/5)),bh=Math.max(2,Math.round(H/5)),sg=ST.bgs*0.3*(W/outDims()[0]),m=Math.ceil(sg*3)+1;
 BG.width=bw+2*m;BG.height=bh+2*m;const g=BG.getContext('2d'),s2=Math.max(BG.width/sw,BG.height/sh);
 if('filter' in g)g.filter='blur('+sg+'px)';
 g.drawImage(p,sx,sy,sw,sh,(BG.width-sw*s2)/2,(BG.height-sh*s2)/2,sw*s2,sh*s2);x.imageSmoothingEnabled=true;x.drawImage(BG,m,m,bw,bh,0,0,W,H)}
-x.drawImage(p,sx,sy,sw,sh,(W-dw)/2,(H-dh)/2,dw,dh)}
+x.drawImage(p,sx,sy,sw,sh,(W-dw)/2,(H-dh)/2,dw,dh);x.restore()}
 function paint(){const p=$('pv'),vw=p.videoWidth;
 if(vw){$('stage').style.aspectRatio=String(outAR());const d=outDims();$('osz').textContent='Output: '+d[0]+' × '+d[1]}
 const r=$('stage').getBoundingClientRect();
 if(r.width){const b=ST.bl,s=ST.sub,z=$('bz'),t=$('sb');
 z.style.display=b.on?'block':'none';z.style.left=b.x*100+'%';z.style.top=b.y*100+'%';z.style.width=b.w*100+'%';z.style.height=b.h*100+'%';
 const bp='blur('+(b.s*r.width/720)+'px)';z.style.backdropFilter=bp;z.style.webkitBackdropFilter=bp;
-t.style.display=s.on?'block':'none';t.style.left=s.x*100+'%';t.style.top=s.y*100+'%';t.style.fontSize=(s.size*r.height)+'px';t.style.color=s.color;
+t.style.display=s.on?'block':'none';t.style.left=s.x*100+'%';t.style.top=s.y*100+'%';t.style.fontSize=(s.size*r.height)+'px';t.style.color=s.color;$('sh').style.color=s.hlOn?s.hl:s.color;const q=$('sbx');q.style.display=(s.on&&s.box)?'block':'none';q.style.left='2%';q.style.width='96%';q.style.top=s.y*100+'%';q.style.height=(s.size*r.height*2.4*s.bh)+'px';q.style.background=rgba(s.bc,s.bo/100);
 drawOut($('cv'),r.width,r.height)}
 if(vw){$('cstage').style.aspectRatio=String(vw/p.videoHeight)}
 const r2=$('cstage').getBoundingClientRect();
@@ -1018,10 +1078,17 @@ $('t-cr').onchange=e=>{ST.crop.on=e.target.checked;$('cpane').classList.toggle('
 $('t-sub').onchange=e=>{ST.sub.on=e.target.checked;$('subctl').classList.toggle('hide',!ST.sub.on);paint()};
 $('t-bl').onchange=e=>{ST.bl.on=e.target.checked;$('blctl').classList.toggle('hide',!ST.bl.on);paint()};
 $('t-bg').onchange=e=>{ST.bgb=e.target.checked;$('bgctl').classList.toggle('hide',!ST.bgb);paint()};
-$('bgs').oninput=e=>{ST.bgs=+e.target.value;paint()};
+$('bgs').oninput=e=>{ST.bgs=1+e.target.value*.39;$('bgsv').textContent=e.target.value+'%';paint()};
 $('sc').oninput=e=>{ST.sub.color=e.target.value;paint()};
-$('ss').oninput=e=>{ST.sub.size=e.target.value/1000;paint()};
-$('bs').oninput=e=>{ST.bl.s=+e.target.value;paint()};
+$('ss').oninput=e=>{ST.sub.size=.055*e.target.value/100;$('ssv').textContent=e.target.value+'%';paint()};
+$('t-hl').onchange=e=>{ST.sub.hlOn=e.target.checked;$('hlctl').classList.toggle('hide',!ST.sub.hlOn);paint()};
+$('hc').oninput=e=>{ST.sub.hl=e.target.value;paint()};
+$('t-bx').onchange=e=>{ST.sub.box=e.target.checked;$('bxctl').classList.toggle('hide',!ST.sub.box);paint()};
+$('bc').oninput=e=>{ST.sub.bc=e.target.value;paint()};
+$('sbo').oninput=e=>{ST.sub.bo=+e.target.value;$('sbov').textContent=e.target.value+'%';paint()};
+$('sbh').oninput=e=>{ST.sub.bh=e.target.value/100;$('sbhv').textContent=e.target.value+'%';paint()};
+$('t-fl').onchange=e=>{ST.flip=e.target.checked;paint()};
+$('bs').oninput=e=>{ST.bl.s=2+e.target.value*.38;$('bsv').textContent=e.target.value+'%';paint()};
 $('pp').onclick=()=>{const p=$('pv');if(!p.src)return;p.paused?p.play():p.pause()};
 const curMd=()=>document.querySelector('input[name=md]:checked').value;
 function setVoiceUI(){const d=curMd()=='dubbing';$('v2w').classList.toggle('hide',!d);$('v1t').textContent=d?'🎤 Voice 1 (မဖြစ်မနေလို)':'🎤 အသံနမူနာ ထည့်ပါ'}
@@ -1032,7 +1099,7 @@ $('sp').oninput=()=>{$('spv').textContent=(+$('sp').value).toFixed(2)+'x'};
 
 // ---- စတင်မည်
 $('go').onclick=async()=>{const V=vf,DL=dlid,L=$('lk').value.trim(),lang=$('lang').value,steps=$('q').value,md=curMd(),spd=$('sp').value;
-const VID=vid,UPP=upP,AF=af,AF2=af2,STY=JSON.stringify({sub:ST.sub,bl:ST.bl,bgb:ST.bgb,bgs:ST.bgs,size:ST.size,q:ST.q,crop:ST.crop});
+const VID=vid,UPP=upP,AF=af,AF2=af2,STY=JSON.stringify({sub:ST.sub,bl:ST.bl,bgb:ST.bgb,bgs:ST.bgs,flip:ST.flip,size:ST.size,q:ST.q,crop:ST.crop});
 const isFile=!!V;
 $('go').disabled=true;let started=false,J=null;
 try{const f0=new FormData();f0.append('name',isFile?V.name:L);const j0=await(await fetch('/api/new',{method:'POST',body:f0})).json();J=j0.id;if(!J)throw new Error(j0.msg||'စတင်မရပါ');
