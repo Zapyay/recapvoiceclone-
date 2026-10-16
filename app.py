@@ -439,6 +439,103 @@ def shorten(text, n):
     o = as_list(jparse(gcall([SHORT.replace("{N}", str(int(n))) + json.dumps([text], ensure_ascii=False)], temp=0.2)))
     return fix_my(o[0]) if o and o[0].strip() else text
 
+
+# ---- Script Recap: Gemini က video ကို ကြည့်ပြီး စကားမလွတ်အောင် window တိုင်း narration ရေး
+SCRIPT_PROMPT = """သင်ဟာ မြန်မာစာ ကျွမ်းကျင်တဲ့ video recap narrator ပါ။ တွဲပါလာတဲ့ video အပိုင်းကို (ပုံရော အသံရော) ကြည့်ပြီး video ရဲ့ ပုံစံ (အမျိုးအစား၊ ခံစားချက်၊ ဇာတ်ကောင်များ၊ ပြောပုံဆိုပုံ) ကို လေ့လာပါ။ ပြီးရင် INPUT ထဲက window တစ်ခုချင်းအတွက် narrator စကားကို မြန်မာလို ရေးပါ။
+- window တိုင်းမှာ စကားပါရမယ်၊ ဘယ် window မှ ဗလာမထားရပါ။ video မှာ စကားပြောနည်းနေတာ၊ တိတ်နေတာ ဖြစ်ရင်တောင် ပုံထဲမှာ မြင်ရတဲ့ လုပ်ရပ်၊ ဇာတ်ကောင်၊ နေရာ၊ ခံစားချက်၊ အခြေအနေကို ဇာတ်ကြောင်းပြောပြသလို ဖြည့်ရေးပါ။
+- window တစ်ခုစီဟာ ဒီ video အပိုင်းရဲ့ start..end စက္ကန့်အတွင်း ဖြစ်နေတာကိုသာ ပြောပါ။ နောက်ပိုင်း ဖြစ်မယ့်အကြောင်း ကြိုမပြောနဲ့။ မမြင်ရတာ၊ မသေချာတာ မဖန်တီးနဲ့။
+- "speech" ပါတဲ့ window မှာ မူရင်းပြောနေတဲ့ စကားရဲ့ အဓိပ္ပာယ်ကို ထည့်ပြီး ပြောပါ။
+- "previous" က အရင်ပြောခဲ့တဲ့ စာတွေ — ဆက်စပ်ဖို့သာ၊ ပြန်မထပ်ပါနဲ့။ တစ်ဆက်တည်း ဇာတ်ကြောင်းပြောသလို သဘာဝကျပါစေ။
+- item တစ်ခုချင်းရဲ့ "chars" က ရေးရမယ့် မြန်မာစာလုံး (character) အရေအတွက် ပစ်မှတ်။ ±15% ထဲ ကိုက်ပါစေ၊ ကျော်လို့မရ။
+- စာလုံးပေါင်း တိတိကျကျ မှန်ရမယ်။ စာလုံးအသစ်ဖန်တီးခြင်း၊ မသေချာတဲ့ ရှားပါးစကားလုံး မသုံးနဲ့။ ရိုးရိုး နေ့စဉ်ပြောတဲ့ စကားလုံးတွေသာ သုံးပါ။ ဝါကျတစ်ကြောင်းချင်း ပြည့်စုံပြီး သဒ္ဒါမှန်ရမယ်။
+- Unicode မြန်မာစာသာ (Zawgyi မသုံးနဲ့)။ ဂဏန်း/English ကို မြန်မာစာလုံးနဲ့ ရေးပါ။ စာကြောင်းအဆုံးမှာ ။ ထည့်ပါ။ ဇာတ်ကောင်နာမည် တစ်ပုံစံတည်း ရေးပါ။
+- string array တစ်ခုတည်း ပြန်ပါ။ အရေအတွက်၊ အစီအစဉ် INPUT နဲ့ အတိအကျ တူရမယ်။
+"""
+
+def script_windows(scenes, wmax=7.0):
+    # scene အားလုံးကို window တိုတိုခွဲ (စကားမပါတဲ့ နေရာတွေပါ narration ရအောင်)
+    out = []
+    for x in scenes:
+        L = x["b"] - x["a"]
+        if L <= 0.05: continue
+        n = max(1, math.ceil(L / wmax)); st = L / n
+        for k in range(n):
+            out.append({"a": x["a"] + k * st, "b": x["a"] + (k + 1) * st, "src": x["src"] if k == 0 else "", "t": "", "spk": 0, "sd": st})
+    i = 0
+    while i < len(out):          # တိုလွန်းတဲ့ window ကို ကပ်လျက်နဲ့ ပေါင်း
+        if out[i]["b"] - out[i]["a"] < 1.5 and len(out) > 1:
+            if i > 0:
+                o = out[i - 1]; o["b"] = out[i]["b"]; o["sd"] = o["b"] - o["a"]; o["src"] = (o["src"] + " " + out[i]["src"]).strip(); out.pop(i)
+            else:
+                o = out[1]; o["a"] = out[0]["a"]; o["sd"] = o["b"] - o["a"]; o["src"] = (out[0]["src"] + " " + o["src"]).strip(); out.pop(0)
+        else: i += 1
+    return out
+
+def gem_upload(src, d):
+    small = os.path.join(d, "gem.mp4")
+    sh(["ffmpeg", "-y", "-i", src, "-vf", "scale=-2:360,fps=5", "-c:v", "libx264", "-crf", "32", "-preset", "veryfast",
+        "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-movflags", "+faststart", small])
+    f = gc.files.upload(file=small)
+    t0 = time.time()
+    while "PROCESSING" in str(getattr(f, "state", "")).upper():
+        if time.time() - t0 > 300: raise RuntimeError("Gemini က video ကို ကြာလွန်းနေပါတယ် (၅ မိနစ်ကျော်)")
+        time.sleep(3); f = gc.files.get(name=f.name)
+    if "FAILED" in str(getattr(f, "state", "")).upper(): raise RuntimeError("Gemini က video ကို မဖတ်နိုင်ပါ")
+    try: os.remove(small)
+    except Exception: pass
+    return f
+
+def script_write(f, wins, cps, dur, prog):
+    chunks, cur = [], []
+    for w in wins:
+        if cur and (len(cur) >= 10 or w["b"] - cur[0]["a"] > 50): chunks.append(cur); cur = []
+        cur.append(w)
+    if cur: chunks.append(cur)
+    prev = []
+
+    def ask(chunk, offs):
+        base = int(math.floor(chunk[0]["a"])) if offs else 0
+        items = []
+        for k, w in enumerate(chunk):
+            it = {"i": k, "start": round(w["a"] - base, 1), "end": round(w["b"] - base, 1), "chars": int(max(8, (w["b"] - w["a"]) * cps * 0.95))}
+            if w["src"]: it["speech"] = w["src"]
+            items.append(it)
+        p = SCRIPT_PROMPT + ("previous: " + json.dumps(prev[-3:], ensure_ascii=False) + "\n" if prev else "") + "INPUT:\n" + json.dumps(items, ensure_ascii=False)
+        part = f
+        if offs:
+            end = min(int(math.ceil(chunk[-1]["b"])), int(dur))
+            if end <= base: end = base + 1
+            try:
+                part = types.Part(file_data=types.FileData(file_uri=f.uri, mime_type=getattr(f, "mime_type", None) or "video/mp4"),
+                                  video_metadata=types.VideoMetadata(start_offset=f"{base}s", end_offset=f"{end}s"))
+            except Exception:
+                part = f; items = None
+                if items is None: raise RuntimeError("video offset မရပါ")
+        out = as_list(jparse(gcall([part, p], temp=0.5)))
+        if len(out) != len(chunk) or not all(str(x).strip() for x in out): raise ValueError("count")
+        return [fix_my(x) for x in out]
+
+    for k, ch in enumerate(chunks):
+        res, hard = None, ""
+        for m_ in ("offs", "whole"):
+            for _ in range(2):
+                try: res = ask(ch, m_ == "offs"); break
+                except ValueError: pass
+                except Exception as e:
+                    hard = str(e)[:200]
+                    if "API key" in hard: raise
+                    break
+            if res: break
+        if not res:
+            if hard: raise RuntimeError("Gemini က video ကို ကြည့်ပြီး ရေးလို့မရပါ — " + hard)
+            res = []
+            for w in ch:
+                try: res.append(ask([w], False)[0])
+                except Exception: res.append("")
+        for w, t in zip(ch, res): w["t"] = t
+        prev.extend([t for t in res if t])
+        prog(k + 1, len(chunks))
+
 # ---- Job state
 WT = [2, 1, 8, 3, 10, 32, 30, 14, 0]
 def pct(j):
@@ -493,6 +590,8 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
         bl = {"on": False, "x": .1, "y": .8, "w": .8, "h": .16, "s": 12, **(stl.get("bl") or {})}
         cl = lambda v, a, b: max(a, min(b, float(v)))
         bgb = bool(stl.get("bgb", True))                       # Blur နောက်ခံ
+        try: bgs = cl(stl.get("bgs", 10), 1, 40)               # Blur နောက်ခံ အားစိုက် (တိုး/လျှော့)
+        except Exception: bgs = 10.0
         size = stl.get("size", "orig")
         if size not in ("orig", "9:16", "3:4", "16:9", "1:1"): size = "orig"
         Q = 1080 if int(stl.get("q", 1080) or 1080) == 1080 else 720
@@ -525,20 +624,28 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
         else: W, H = Q, round(Q / ar)
         W, H = W // 2 * 2, H // 2 * 2
         need_bg = bgb and abs(cw / ch_ - W / H) > 0.01       # Size မကိုက်ရင် Blur နောက်ခံ ဖြည့်
-        bw, bh = max(2, (W // 10) // 2 * 2), max(2, (H // 10) // 2 * 2)
+        gw, gh = max(2, (W // 5) // 2 * 2), max(2, (H // 5) // 2 * 2)
+        bsig = bgs * 0.3
         crop_f = f"crop={cw}:{ch_}:{cx}:{cy}," if crop_on else ""
         P(job, 1, "done", f"{dur/60:.1f} မိနစ်" if dur >= 60 else f"{dur:.0f} စက္ကန့်", 1)
 
         # 2) AssemblyAI
         P(job, 2, "run", "အသံထုတ်နေ", .05)
         aud = os.path.join(d, "audio.mp3")
-        try: sh(["ffmpeg", "-y", "-i", src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "48k", aud])
-        except RuntimeError: raise RuntimeError("Video ထဲမှာ အသံ မတွေ့ပါ")
-        sents, lc = aai_transcribe(aud, lang, lambda f, s: P(job, 2, "run", s, f), diar=(mode == "dubbing"))
-        if not sents: raise RuntimeError("Video ထဲမှာ စကားပြောသံ မတွေ့ပါ (သို့) AssemblyAI က မဖတ်နိုင်ပါ")
+        sents, lc = [], ""
+        try:
+            try: sh(["ffmpeg", "-y", "-i", src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "48k", aud])
+            except RuntimeError: raise RuntimeError("Video ထဲမှာ အသံ မတွေ့ပါ")
+            sents, lc = aai_transcribe(aud, lang, lambda f, s: P(job, 2, "run", s, f), diar=(mode == "dubbing"))
+        except Exception as e:
+            if mode != "script": raise
+            print("Script Recap: စကားပြောသံ မရလည်း ဆက်သွားမယ် —", str(e)[:120])
+        if not sents and mode != "script": raise RuntimeError("Video ထဲမှာ စကားပြောသံ မတွေ့ပါ (သို့) AssemblyAI က မဖတ်နိုင်ပါ")
         scenes = build_scenes(sents, dur)
+        if mode == "script":
+            scenes = script_windows(scenes or [{"a": 0.0, "b": dur, "src": "", "t": "", "spk": 0, "sd": 0.0}])
         nspk = len({x["spk"] for x in scenes if x["src"]})
-        P(job, 2, "done", f"{len(sents)} ကြောင်း ({lc})" + (f" · {nspk} ယောက်" if mode == "dubbing" else ""), 1)
+        P(job, 2, "done", (f"{len(sents)} ကြောင်း ({lc})" if sents else "စကားပြော မရှိ") + (f" · {nspk} ယောက်" if mode == "dubbing" else "") + (f" · {len(scenes)} window" if mode == "script" else ""), 1)
 
         # 3) နမူနာအသံ
         P(job, 3, "run", "တန်းစီစောင့်နေ", 0)
@@ -556,20 +663,31 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
 
         # 4) ဘာသာပြန်
         P(job, 4, "run", "", 0)
-        sp = [x for x in scenes if x["src"]]
-        hint = RECAP_HINT if mode == "recap" else DUB_HINT
-        def tr_chunk(chunk):
-            items = []
-            for x in chunk:
-                it = {"text": x["src"], "chars": int(max(6, x["sd"] * cps))}
-                if mode == "dubbing": it["spk"] = x["spk"] + 1
-                items.append(it)
-            for x, t in zip(chunk, translate_batch(items, hint)): x["t"] = t
-        chunks = [sp[i:i + 15] for i in range(0, len(sp), 15)]
-        with ThreadPoolExecutor(max_workers=3) as ex2:
-            f2 = [ex2.submit(tr_chunk, c) for c in chunks]
-            for k, fu in enumerate(f2):
-                fu.result(); P(job, 4, "run", f"{k+1}/{len(chunks)}", (k + 1) / len(chunks))
+        if mode == "script":
+            P(job, 4, "run", "Video ကို Gemini ဆီ တင်နေ", .02)
+            gf = None
+            try:
+                gf = gem_upload(src, d)
+                script_write(gf, scenes, cps, dur, lambda i, n: P(job, 4, "run", f"{i}/{n}", .1 + .9 * i / n))
+            finally:
+                if gf is not None:
+                    try: gc.files.delete(name=gf.name)
+                    except Exception: pass
+        else:
+            sp = [x for x in scenes if x["src"]]
+            hint = RECAP_HINT if mode == "recap" else DUB_HINT
+            def tr_chunk(chunk):
+                items = []
+                for x in chunk:
+                    it = {"text": x["src"], "chars": int(max(6, x["sd"] * cps))}
+                    if mode == "dubbing": it["spk"] = x["spk"] + 1
+                    items.append(it)
+                for x, t in zip(chunk, translate_batch(items, hint)): x["t"] = t
+            chunks = [sp[i:i + 15] for i in range(0, len(sp), 15)]
+            with ThreadPoolExecutor(max_workers=3) as ex2:
+                f2 = [ex2.submit(tr_chunk, c) for c in chunks]
+                for k, fu in enumerate(f2):
+                    fu.result(); P(job, 4, "run", f"{k+1}/{len(chunks)}", (k + 1) / len(chunks))
         for x in scenes:
             if x["src"] and not x["t"]: x["t"] = fix_my(x["src"])
         N = len(scenes)
@@ -589,7 +707,7 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
             pre = f"{crop_f}setpts=(PTS-STARTPTS)/{s:.5f},fps={FPS},tpad=stop_mode=clone:stop_duration=30,setsar=1"
             fit = f"scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2"
             if need_bg:
-                bgf = f"scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},gblur=sigma=2,scale={W}:{H}"
+                bgf = f"scale={gw}:{gh}:force_original_aspect_ratio=increase,crop={gw}:{gh},gblur=sigma={bsig:.2f},scale={W}:{H}"
                 fc = f"[0:v]{pre},split[a][b];[b]{bgf}[bg];[a]{fit}[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
             else:
                 fc = f"[0:v]{pre},{fit},pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[v]"
@@ -726,7 +844,7 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 #sb{position:absolute;transform:translate(-50%,-50%);text-align:center;white-space:pre;font-weight:700;line-height:1.5;font-family:"Noto Sans Myanmar","Padauk",system-ui,sans-serif;text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 2px 4px #000;touch-action:none;cursor:move;padding:0 6px;outline:1px dashed rgba(255,255,255,.8)}
 </style></head><body><main>
 <h1>🎬 Auto Movie Recap</h1>
-<div class="card"><div class="top"><span>🆔 User ID:</span><span class="id" id="uid">…</span><button class="mini" id="cp">📋 Copy</button></div>
+<div class="card"><div class="top"><span>🆔 User ID:</span><span class="id" id="uid">…</span><button class="mini" id="cp">📋 Copy</button><button class="mini" id="snd" title="ခလုတ်နှိပ်သံ">🔊</button></div>
 <div class="note" style="opacity:1">🎞 ထုတ်ခွင့်ကျန်: <span id="rem">…</span></div>
 <div class="row"><button class="btn ol" id="hbtn">📜 History</button><button class="btn ol" id="newbtn">➕ Video အသစ်</button></div></div>
 
@@ -747,6 +865,7 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 <div class="card" id="t1">
 <h3 style="margin-top:0">Model</h3>
 <label class="opt"><input type="radio" name="md" value="recap" checked><div><b>🎙 Recap</b><div class="note">ဇာတ်လမ်းတစ်ပုဒ်လုံးကို လူတစ်ယောက်တည်း နောက်ခံအသံနဲ့ ပြောပြသလို ထုတ်မယ်။ (အသံ ၁ ခု)</div></div></label>
+<label class="opt"><input type="radio" name="md" value="script"><div><b>📝 Script Recap</b><div class="note">Video မှာ စကားပြောနည်းလို့ အသံလွတ်နေရင် AI က video ကို ကြည့်ပြီး ပြောစရာမရှိတဲ့ နေရာတွေပါ ဇာတ်ကြောင်းရေးထည့်ပေးမယ် (စကားမလွတ်တော့ဘူး)။ (အသံ ၁ ခု)</div></div></label>
 <label class="opt"><input type="radio" name="md" value="dubbing"><div><b>🎭 Dubbing</b><div class="note">လူနှစ်ယောက် စကားပြောတာကို ခွဲပြီး ထုတ်မယ်။ (အသံ ၂ ခု ထည့်လို့ရ)</div></div></label>
 <h3>Video Size</h3>
 <div class="chips"><label class="chip on"><input type="radio" name="sz" value="orig" checked>မူရင်း</label><label class="chip"><input type="radio" name="sz" value="9:16">9:16</label><label class="chip"><input type="radio" name="sz" value="3:4">3:4</label><label class="chip"><input type="radio" name="sz" value="16:9">16:9</label><label class="chip"><input type="radio" name="sz" value="1:1">1:1</label></div>
@@ -769,6 +888,7 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 <div class="sw"><span>Blur ချိန်ညှိ</span><input type="checkbox" id="t-bl"></div>
 <div id="blctl" class="pane hide"><div class="ctl"><label>💧 Blur အားစိုက်</label><input type="range" id="bs" min="2" max="40" value="12"></div></div>
 <div class="sw"><span>Blur နောက်ခံ</span><input type="checkbox" id="t-bg" checked></div>
+<div id="bgctl" class="pane"><div class="ctl"><label>💧 နောက်ခံ Blur</label><input type="range" id="bgs" min="1" max="40" value="10"></div><div class="note">ဘယ်ဘက် = ဝါးနည်း (ရှင်း)၊ ညာဘက် = ဝါးများ။ Size ရွေးထားလို့ video ရဲ့ ဘေး/အပေါ်အောက်မှာ ပေါ်တဲ့ နောက်ခံကို ပြောင်းပေးတာ။</div></div>
 <div class="note">Blur နောက်ခံ = ရွေးထားတဲ့ Size နဲ့ Video မကိုက်လို့ ကျန်တဲ့နေရာကို Video ကိုယ်တိုင်ကို blur လုပ်ပြီး ဖြည့်ပေးတာ။ ပိတ်ထားရင် အနက်ရောင်ပဲ ဖြည့်မယ်။ စာတန်း/Blur မလိုရင် အပေါ်က ခလုတ်တွေကို ပိတ်ထားပါ။</div>
 </div>
 
@@ -804,7 +924,7 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 </main><script>
 const $=i=>document.getElementById(i);
 let vf=null,af=null,af2=null,dlid=null,vid=null,upP=null,srcReady=false,dur=0,objU=null,watching=null,view='main',dT=null,curId=null,seen={},REM=null;
-const ST={sub:{on:true,x:.5,y:.88,size:.055,color:'#ffffff'},bl:{on:false,x:.1,y:.8,w:.8,h:.16,s:12},bgb:true,size:'orig',q:1080,crop:{on:false,x:.1,y:.1,w:.8,h:.8}};
+const ST={sub:{on:true,x:.5,y:.88,size:.055,color:'#ffffff'},bl:{on:false,x:.1,y:.8,w:.8,h:.16,s:12},bgb:true,bgs:10,size:'orig',q:1080,crop:{on:false,x:.1,y:.1,w:.8,h:.8}};
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const STEPS=["Video ရယူခြင်း","Video စစ်ဆေးခြင်း","AssemblyAI နဲ့ စကားကို စာထုတ်ခြင်း","နမူနာအသံ ပြင်ဆင်ခြင်း","Gemini နဲ့ မြန်မာလို ဘာသာပြန်ခြင်း","Voice Clone နဲ့ အသံထုတ်ခြင်း","Video ဖြတ်ညှိခြင်း","စာတန်း + Blur ထည့်ပြီး MP4 ထုတ်ခြင်း","ပြီးစီးပါပြီ"];
 const mm=s=>String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0');
@@ -856,8 +976,10 @@ function outDims(){const ar=outAR(),Q=ST.q;let W,H;if(ar>=1){H=Q;W=Math.round(Q*
 function drawOut(cv,W,H){W=Math.round(W);H=Math.round(H);if(cv.width!=W||cv.height!=H){cv.width=W;cv.height=H}
 const x=cv.getContext('2d'),p=$('pv'),vw=p.videoWidth,vh=p.videoHeight;x.fillStyle='#000';x.fillRect(0,0,W,H);if(!vw||p.readyState<2)return;
 const k=ST.crop.on?ST.crop:{x:0,y:0,w:1,h:1},sx=k.x*vw,sy=k.y*vh,sw=k.w*vw,sh=k.h*vh,s=Math.min(W/sw,H/sh),dw=sw*s,dh=sh*s;
-if(ST.bgb&&(Math.abs(dw-W)>1||Math.abs(dh-H)>1)){BG.width=Math.max(2,Math.round(W/14));BG.height=Math.max(2,Math.round(H/14));const s2=Math.max(BG.width/sw,BG.height/sh);
-BG.getContext('2d').drawImage(p,sx,sy,sw,sh,(BG.width-sw*s2)/2,(BG.height-sh*s2)/2,sw*s2,sh*s2);x.imageSmoothingEnabled=true;x.drawImage(BG,0,0,W,H)}
+if(ST.bgb&&(Math.abs(dw-W)>1||Math.abs(dh-H)>1)){const bw=Math.max(2,Math.round(W/5)),bh=Math.max(2,Math.round(H/5)),sg=ST.bgs*0.3*(W/outDims()[0]),m=Math.ceil(sg*3)+1;
+BG.width=bw+2*m;BG.height=bh+2*m;const g=BG.getContext('2d'),s2=Math.max(BG.width/sw,BG.height/sh);
+if('filter' in g)g.filter='blur('+sg+'px)';
+g.drawImage(p,sx,sy,sw,sh,(BG.width-sw*s2)/2,(BG.height-sh*s2)/2,sw*s2,sh*s2);x.imageSmoothingEnabled=true;x.drawImage(BG,m,m,bw,bh,0,0,W,H)}
 x.drawImage(p,sx,sy,sw,sh,(W-dw)/2,(H-dh)/2,dw,dh)}
 function paint(){const p=$('pv'),vw=p.videoWidth;
 if(vw){$('stage').style.aspectRatio=String(outAR());const d=outDims();$('osz').textContent='Output: '+d[0]+' × '+d[1]}
@@ -895,7 +1017,8 @@ chips('sz',v=>{ST.size=v;paint()});chips('ql',v=>{ST.q=+v;paint()});
 $('t-cr').onchange=e=>{ST.crop.on=e.target.checked;$('cpane').classList.toggle('hide',!ST.crop.on);setTimeout(paint,30)};
 $('t-sub').onchange=e=>{ST.sub.on=e.target.checked;$('subctl').classList.toggle('hide',!ST.sub.on);paint()};
 $('t-bl').onchange=e=>{ST.bl.on=e.target.checked;$('blctl').classList.toggle('hide',!ST.bl.on);paint()};
-$('t-bg').onchange=e=>{ST.bgb=e.target.checked;paint()};
+$('t-bg').onchange=e=>{ST.bgb=e.target.checked;$('bgctl').classList.toggle('hide',!ST.bgb);paint()};
+$('bgs').oninput=e=>{ST.bgs=+e.target.value;paint()};
 $('sc').oninput=e=>{ST.sub.color=e.target.value;paint()};
 $('ss').oninput=e=>{ST.sub.size=e.target.value/1000;paint()};
 $('bs').oninput=e=>{ST.bl.s=+e.target.value;paint()};
@@ -909,7 +1032,7 @@ $('sp').oninput=()=>{$('spv').textContent=(+$('sp').value).toFixed(2)+'x'};
 
 // ---- စတင်မည်
 $('go').onclick=async()=>{const V=vf,DL=dlid,L=$('lk').value.trim(),lang=$('lang').value,steps=$('q').value,md=curMd(),spd=$('sp').value;
-const VID=vid,UPP=upP,AF=af,AF2=af2,STY=JSON.stringify({sub:ST.sub,bl:ST.bl,bgb:ST.bgb,size:ST.size,q:ST.q,crop:ST.crop});
+const VID=vid,UPP=upP,AF=af,AF2=af2,STY=JSON.stringify({sub:ST.sub,bl:ST.bl,bgb:ST.bgb,bgs:ST.bgs,size:ST.size,q:ST.q,crop:ST.crop});
 const isFile=!!V;
 $('go').disabled=true;let started=false,J=null;
 try{const f0=new FormData();f0.append('name',isFile?V.name:L);const j0=await(await fetch('/api/new',{method:'POST',body:f0})).json();J=j0.id;if(!J)throw new Error(j0.msg||'စတင်မရပါ');
@@ -965,6 +1088,15 @@ const p=$('pv');p.pause();p.removeAttribute('src');p.load();p.classList.add('hid
 $('dropt').textContent='Video ဖိုင် ရွေးပါ';$('spw').classList.add('hide');$('sp').value=1;$('spv').textContent='1.00x';
 document.title='Auto Movie Recap';upd();setTab(1);show('main')}
 $('nx').onclick=$('nx2').onclick=$('hb8').onclick=$('newbtn').onclick=newVideo;
+
+// ---- ခလုတ်နှိပ်သံ (Pop)
+const POP="data:audio/mpeg;base64,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";
+let SND=true;try{SND=localStorage.getItem('snd')!=='0'}catch(e){}
+const POPS=[];let popi=0,lastPop=0;
+function pop(){if(!SND||Date.now()-lastPop<120)return;lastPop=Date.now();try{if(!POPS.length){for(let i=0;i<4;i++){const a=new Audio(POP);a.preload='auto';POPS.push(a)}}const a=POPS[popi++%POPS.length];a.currentTime=0;const r=a.play();if(r&&r.catch)r.catch(()=>{})}catch(e){}}
+document.addEventListener('click',e=>{if(e.target.closest&&e.target.closest('button,label,select,summary,a.btn,.sw,.chip,.opt,.drop'))pop()},true);
+function sndUI(){$('snd').textContent=SND?'🔊':'🔇'}
+$('snd').onclick=()=>{SND=!SND;try{localStorage.setItem('snd',SND?'1':'0')}catch(e){}sndUI();if(SND){lastPop=0;pop()}};sndUI();
 
 refreshMe();show('main');upd();
 fetch('/api/jobs').then(r=>r.json()).then(l=>{if(l.some(j=>j.status=='run'))show('hist')}).catch(()=>{});
@@ -1040,7 +1172,7 @@ def start(jid: str = Form(""), vid: str = Form(""), dlid: str = Form(""), voice:
         if not re.fullmatch(r"[0-9a-f]{12,40}", x) or not os.path.exists(os.path.join(WORK, "up_" + x)):
             return JSONResponse({"msg": "ဖိုင်မတွေ့ပါ၊ ပြန်တင်ပါ"}, status_code=400)
     if not re.fullmatch(r"[a-z]{2,3}(_[a-z]{2})?|auto", lang): lang = "auto"
-    mode = "dubbing" if mode == "dubbing" else "recap"
+    mode = mode if mode in ("dubbing", "script") else "recap"
     u = srv(action="use", id=UID)      # ထုတ်ခွင့် ၁ ပုဒ် နှုတ်
     if not u.get("ok"): return JSONResponse({"msg": u.get("msg", "video ထုတ်ခွင့် မကျန်တော့ပါ")}, status_code=402)
     if u.get("ticket"): JOBS[jid]["ticket"] = u["ticket"]
