@@ -732,7 +732,9 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
         texts, alens = [""] * N, [0.0] * N
         def enc(i, a, b, t, au):
             T = b - a
-            if t: dd = max(T, len(au) / SR + 0.15); s = max(MIN_SPEED, min(1.0, T / dd))
+            if t and spd > 1.02 and len(au) / SR + 0.15 < T:
+                dd = max(0.5, len(au) / SR + 0.15); s = min(2.5, T / dd)      # အသံမြန်ရင် Video ကိုလည်း မြန်ပေး
+            elif t: dd = max(T, len(au) / SR + 0.15); s = max(MIN_SPEED, min(1.0, T / dd))
             else: dd, s = T, 1.0
             n = max(FPS, math.ceil(dd * FPS)); dd = n / FPS
             need = max(0.3, min(dd * s, T, dur - a))
@@ -769,7 +771,7 @@ def run_job(jid, vid, dlid, voice, voice2, lang, steps, mode, style, spd=1.0):
                             if L > T * 1.1 and len(t) > 12:
                                 t2 = shorten(t, len(t) * T * 0.97 / L); au2 = synth(t2, ref, steps, spd, d)
                                 if abs(len(au2) / SR - T) < abs(L - T): au, t, L = au2, t2, len(au2) / SR
-                            elif L < T * 0.75:
+                            elif L < T * 0.75 and spd <= 1.02:
                                 t2 = lengthen(t, len(t) * T * 0.92 / L); au2 = synth(t2, ref, steps, spd, d)
                                 if abs(len(au2) / SR - T) < abs(L - T): au, t, L = au2, t2, len(au2) / SR
                         except Exception: pass
@@ -957,7 +959,7 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 <div class="note">Voice 2 မထည့်ရင် နှစ်ယောက်လုံး Voice 1 နဲ့ပဲ ပြောပါမယ်။</div></div>
 <div id="spw" class="hide"><h3>⏱ အနှေး အမြန် ချိန်ညှိ</h3>
 <div class="ctl"><span>🐢</span><input type="range" id="sp" min="0.6" max="1.5" step="0.05" value="1"><span>🐇</span></div>
-<div class="note">အသံမြန်နှုန်း: <b id="spv">1.00x</b> (1.00x = ပုံမှန်)။ မြန်လေ အသံတိုလေ၊ နှေးရင် အသံရှည်လို့ Video ကို နှေးပေးရနိုင်တယ်။</div></div>
+<div class="note">အသံမြန်နှုန်း: <b id="spv">1.00x</b> (1.00x = ပုံမှန်)။ မြန်လေ အသံတိုလေ၊ Video ကိုလည်း အသံနဲ့အညီ မြန်ပေးမယ် (အသံနဲ့ မကွာတော့ဘူး)။ နှေးရင် အသံရှည်လို့ Video ကို နှေးပေးရနိုင်တယ်။</div></div>
 <h3>⚡ အသံထုတ် အရည်အသွေး</h3><select id="q"><option value="4">အမြန်ဆုံး (အရည်အသွေး နည်းနည်းလျော့)</option><option value="6" selected>ပုံမှန်</option><option value="10">အကောင်းဆုံး (နှေးတယ်)</option></select>
 <div class="note">သန့်တဲ့ အသံ စက္ကန့် ၁၀–၃၀။ ကိုယ့်အသံ (သို့) ခွင့်ပြုချက်ရတဲ့ အသံသာ သုံးပါ။</div>
 <div class="note">ℹ️ ⏳ ၁၀ မိနစ် video ဆို ၁၅–၃၀ မိနစ်ခန့် ကြာနိုင်ပါတယ်။ Colab tab ကို မပိတ်ပါနဲ့။</div>
@@ -976,7 +978,17 @@ li.run{background:#fff1f2;color:#000;font-weight:600}
 <div id="v-res" class="card hide"><h2>ရလဒ် — <span id="rn"></span></h2><video id="rv" controls playsinline></video>
 <input id="fn" type="text" placeholder="ဖိုင်အမည် (မပေးလည်းရ)" style="margin-top:10px">
 <a id="dl" class="btn">⬇ MP4 ဒေါင်းမည်</a>
-<button class="btn ol" id="nx2">➕ Video အသစ်ထုတ်မည်</button></div>
+<button class="btn ol" id="nx2">➕ Video အသစ်ထုတ်မည်</button>
+<button class="btn ol" id="thb">🖼 Thumbnail ယူမည်</button></div>
+
+<div id="v-thumb" class="card hide"><h2>🖼 Thumbnail</h2>
+<div class="stg" id="thstage" style="max-width:420px;aspect-ratio:3/4;touch-action:none"><canvas id="thc" style="touch-action:none"></canvas></div>
+<div class="note" id="thro"></div>
+<div class="note">ပုံပေါ်မှာ လက်နဲ့ ဆွဲလို့ရတယ် — စာခေါင်းစဉ်ကို ဆွဲရင် စာရွှေ့၊ အနီ/အပြာ လိုင်းကို ဆွဲရင် လိုင်း/အဖြူအလုံး ရွှေ့၊ ကျန်တဲ့နေရာကို ဆွဲရင် ပုံရွှေ့။ ပေတံ ဂဏန်းတွေက ကြည့်ဖို့သာ၊ Save လုပ်တဲ့ ပုံမှာ မပါပါဘူး။</div>
+<video id="thv" playsinline muted preload="auto" class="hide"></video>
+<div id="thctl"></div>
+<button class="btn" id="thsave">💾 Save — ပုံဒေါင်းမည်</button>
+<button class="btn ol" id="thback">⬅ ရလဒ်ကို ပြန်သွားမည်</button></div>
 
 <div id="v-hist" class="card hide"><h2>📜 History</h2><div id="hl"></div>
 <button class="btn ol" id="hb8">➕ Video အသစ်ထုတ်မည်</button></div>
@@ -991,7 +1003,7 @@ const c=(v,a,b)=>Math.max(a,Math.min(b,v));
 const rgba=(h,a)=>{const n=parseInt(h.slice(1),16);return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')'};
 const rid=()=>Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');
 const MAXS=900;
-function show(v){view=v;['main','job','res','hist'].forEach(n=>$('v-'+n).classList.toggle('hide',n!=v));if(v!='res')$('rv').pause();if(v!='main')$('pv').pause();window.scrollTo(0,0);if(v=='main')setTimeout(paint,80);if(v=='hist')loadHist()}
+function show(v){view=v;['main','job','res','hist','thumb'].forEach(n=>$('v-'+n).classList.toggle('hide',n!=v));if(v!='res')$('rv').pause();if(v!='thumb')try{$('thv').pause()}catch(e){};if(v!='main')$('pv').pause();window.scrollTo(0,0);if(v=='main')setTimeout(paint,80);if(v=='hist')loadHist()}
 function setTab(n){document.querySelectorAll('.tabs3 button').forEach(b=>b.classList.toggle('on',+b.dataset.t==n));[1,2,3].forEach(i=>$('t'+i).classList.toggle('hide',i!=(n==4?2:n)));$('pn-sub').classList.toggle('hide',n==4);$('pn-blr').classList.toggle('hide',n!=4);setTimeout(paint,60)}
 document.querySelectorAll('.tabs3 button').forEach(b=>b.onclick=()=>setTab(+b.dataset.t));
 
@@ -1155,6 +1167,76 @@ const p=$('pv');p.pause();p.removeAttribute('src');p.load();p.classList.add('hid
 $('dropt').textContent='Video ဖိုင် ရွေးပါ';$('spw').classList.add('hide');$('sp').value=1;$('spv').textContent='1.00x';
 document.title='Auto Movie Recap';upd();setTab(1);show('main')}
 $('nx').onclick=$('nx2').onclick=$('hb8').onclick=$('newbtn').onclick=newVideo;
+
+// ---- Thumbnail ပြုလုပ်ခြင်း
+const TH={w:1080,h:1440,zoom:1,px:.5,py:.5,img:null,title:'ခေါင်းစဉ် ဒီမှာ ရေးပါ',c1:'#ffd400',c2:'#22d3ee',two:false,ts:100,tx:.5,ty:.075,bandOn:true,bc:'#000000',bo:100,bh:.155,barOn:true,b1:'#22d3ee',b2:'#e11d2e',bd:'#ffffff',bt:100,bpos:.75,by:.158,ruler:true,vid:null};
+const thv=$('thv'),thc=$('thc');
+const thR=(l,id,mn,mx,v)=>`<div class="ctl"><label>${l}</label><input type="range" id="${id}" min="${mn}" max="${mx}" value="${v}"><b class="pv" id="${id}v">${v}%</b></div>`;
+const thC=(l,id,v)=>`<div class="ctl"><label>${l}</label><input type="color" id="${id}" value="${v}"></div>`;
+const thS=(l,id,on)=>`<div class="sw"><span>${l}</span><input type="checkbox" id="${id}"${on?' checked':''}></div>`;
+$('thctl').innerHTML=`<h3>🖼 ပုံ</h3>
+${thR('🎞 Video ပုံရွေး','thf',0,100,30)}
+<div class="note">Slider ကို ဆွဲပြီး ဇာတ်ကောင်တွေ ပီပီသသ ပေါ်တဲ့ ပုံကို ရွေးပါ။</div>
+<div class="ctl"><label>🖼 ပုံ ကိုယ်တိုင်</label><input type="file" id="thimg" accept="image/*"></div>
+${thR('🔍 ချဲ့/ချုံ့','thz',100,300,100)}
+<h3>📐 Size</h3>
+<div class="chips"><label class="chip on"><input type="radio" name="ths" value="1080x1440" checked>3:4</label><label class="chip"><input type="radio" name="ths" value="1080x1350">4:5</label><label class="chip"><input type="radio" name="ths" value="1080x1920">9:16</label><label class="chip"><input type="radio" name="ths" value="1080x1080">1:1</label><label class="chip"><input type="radio" name="ths" value="1920x1080">16:9</label></div>
+<h3>✏ စာခေါင်းစဉ် (တစ်ကြောင်းတည်း)</h3>
+<input id="tht" type="text" value="${TH.title}">
+${thC('🎨 စာအရောင်','thc1',TH.c1)}
+${thS('စာကို ၂ ရောင် ခွဲမယ် (ရှေ့တစ်ဝက် / နောက်တစ်ဝက်)','thtw',false)}
+<div id="thc2w" class="pane hide">${thC('🎨 စာ အရောင် ၂','thc2',TH.c2)}</div>
+${thR('🔠 စာအရွယ်','thts',40,200,100)}
+${thS('⬛ စာအောက်ခံ (အမဲရောင်)','thbo',true)}
+<div id="thbow" class="pane">${thC('🎨 အောက်ခံ အရောင်','thbc',TH.bc)}${thR('◐ အထူအပါး','thbop',0,100,100)}${thR('↕ အမြင့်','thbh',5,40,16)}</div>
+${thS('➖ စာအောက်က အပြာ/အနီ လိုင်း','thlo',true)}
+<div id="thlow" class="pane">${thC('🎨 လိုင်း (ဘယ်ဘက်)','thb1',TH.b1)}${thC('🎨 လိုင်း (ညာဘက်)','thb2',TH.b2)}${thC('⚪ အလုံး အရောင်','thbd',TH.bd)}${thR('➖ လိုင်း အထူ','thbt',30,300,100)}${thR('⚪ အလုံး နေရာ','thbp',0,100,75)}</div>
+${thS('📏 ပေတံ ပြမယ် (Save ရင် မပါ)','thru',true)}`;
+let thRaf=0;const thr=()=>{cancelAnimationFrame(thRaf);thRaf=requestAnimationFrame(thPaint)};
+function thSrc(){if(TH.img)return TH.img;return(thv.readyState>=2&&thv.videoWidth)?thv:null}
+function thRender(x,W,H,pv){
+x.fillStyle='#000';x.fillRect(0,0,W,H);
+const S=thSrc();
+if(S){const sw=S.naturalWidth||S.videoWidth,sh=S.naturalHeight||S.videoHeight,s=Math.max(W/sw,H/sh)*TH.zoom;x.drawImage(S,(W-sw*s)*TH.px,(H-sh*s)*TH.py,sw*s,sh*s)}
+if(TH.bandOn){x.fillStyle=rgba(TH.bc,TH.bo/100);x.fillRect(0,0,W,H*TH.bh)}
+if(TH.barOn){const y=H*TH.by,t=Math.max(2,H*.008*TH.bt/100),dx=W*TH.bpos;x.fillStyle=TH.b1;x.fillRect(0,y-t/2,dx,t);x.fillStyle=TH.b2;x.fillRect(dx,y-t/2,W-dx,t);x.fillStyle=TH.bd;x.beginPath();x.arc(dx,y,Math.max(t*1.8,W*.016),0,7);x.fill()}
+const T=TH.title.replace(/\s*[\r\n]+\s*/g,' ').trim();
+if(T){let fs=W*.07*TH.ts/100;const F=f=>'800 '+f+'px "Noto Sans Myanmar","Padauk",system-ui,sans-serif';x.font=F(fs);let tw=x.measureText(T).width;if(tw>W*.96){fs*=W*.96/tw;x.font=F(fs);tw=x.measureText(T).width}
+x.textBaseline='middle';x.textAlign='left';const x0=TH.tx*W-tw/2,y=TH.ty*H;
+if(TH.two&&T.includes(' ')){const w=T.split(' '),k=Math.ceil(w.length/2),a=w.slice(0,k).join(' ')+' ',b=w.slice(k).join(' ');x.fillStyle=TH.c1;x.fillText(a,x0,y);x.fillStyle=TH.c2;x.fillText(b,x0+x.measureText(a).width,y)}
+else{x.fillStyle=TH.c1;x.fillText(T,x0,y)}}
+if(pv&&TH.ruler){const f=Math.max(9,W*.028);x.font='700 '+f+'px system-ui,sans-serif';x.textAlign='center';x.textBaseline='middle';x.lineWidth=3;
+x.strokeStyle='rgba(255,255,255,.35)';x.lineWidth=1;x.beginPath();x.moveTo(W/2,0);x.lineTo(W/2,H);x.moveTo(0,H/2);x.lineTo(W,H/2);x.stroke();
+for(let i=0;i<=20;i++){const u=i/20,big=i%2==0,L=(big?.035:.018)*Math.min(W,H);x.strokeStyle='#fff';x.lineWidth=big?2:1;x.beginPath();
+x.moveTo(u*W,0);x.lineTo(u*W,L);x.moveTo(u*W,H);x.lineTo(u*W,H-L);x.moveTo(0,u*H);x.lineTo(L,u*H);x.moveTo(W,u*H);x.lineTo(W-L,u*H);x.stroke();
+if(big&&i>0&&i<20){const n=String(i*5);x.lineWidth=3;x.strokeStyle='#000';x.fillStyle='#fff';
+for(const q of [[u*W,H-L-f*.8],[u*W,L+f*.8],[L+f*.9,u*H],[W-L-f*.9,u*H]]){x.strokeText(n,q[0],q[1]);x.fillText(n,q[0],q[1])}}}}}
+function thSize(){const W=TH.w,H=TH.h;thc.width=540;thc.height=Math.round(540*H/W);$('thstage').style.aspectRatio=W+'/'+H}
+function thPaint(){thRender(thc.getContext('2d'),thc.width,thc.height,true);
+$('thro').textContent='စာ x '+(TH.tx*100).toFixed(1)+'%  y '+(TH.ty*100).toFixed(1)+'%  ·  လိုင်း y '+(TH.by*100).toFixed(1)+'%  အလုံး x '+(TH.bpos*100).toFixed(1)+'%'}
+const thB=(id,fn)=>{const e=$(id);e.oninput=e.onchange=()=>{fn(e.type=='checkbox'?e.checked:e.value);const v=$(id+'v');if(v)v.textContent=e.value+'%';thr()}};
+thB('thf',v=>{if(thv.duration)thv.currentTime=thv.duration*v/100});thv.addEventListener('seeked',thr);thv.addEventListener('loadeddata',thr);
+thB('thz',v=>TH.zoom=v/100);thB('tht',v=>TH.title=v);thB('thc1',v=>TH.c1=v);thB('thc2',v=>TH.c2=v);
+thB('thtw',v=>{TH.two=v;$('thc2w').classList.toggle('hide',!v)});thB('thts',v=>TH.ts=+v);
+thB('thbo',v=>{TH.bandOn=v;$('thbow').classList.toggle('hide',!v)});thB('thbc',v=>TH.bc=v);thB('thbop',v=>TH.bo=+v);thB('thbh',v=>TH.bh=v/100);
+thB('thlo',v=>{TH.barOn=v;$('thlow').classList.toggle('hide',!v)});thB('thb1',v=>TH.b1=v);thB('thb2',v=>TH.b2=v);thB('thbd',v=>TH.bd=v);thB('thbt',v=>TH.bt=+v);thB('thbp',v=>TH.bpos=v/100);
+thB('thru',v=>TH.ruler=v);
+$('thimg').onchange=e=>{const f=e.target.files[0];if(!f)return;const im=new Image();im.onload=()=>{TH.img=im;TH.px=TH.py=.5;thr()};im.src=URL.createObjectURL(f)};
+chips('ths',v=>{const a=v.split('x');TH.w=+a[0];TH.h=+a[1];thSize();thr()});
+(function(){let m=null;thc.addEventListener('pointerdown',e=>{e.preventDefault();thc.setPointerCapture(e.pointerId);const r=thc.getBoundingClientRect(),fx=(e.clientX-r.left)/r.width,fy=(e.clientY-r.top)/r.height;
+const k=(TH.barOn&&Math.abs(fy-TH.by)<.025)?'bar':(Math.abs(fy-TH.ty)<.05&&TH.title.trim())?'txt':'pan';
+m={k,x:e.clientX,y:e.clientY,tx:TH.tx,ty:TH.ty,by:TH.by,px:TH.px,py:TH.py}});
+thc.addEventListener('pointermove',e=>{if(!m)return;const r=thc.getBoundingClientRect(),dx=(e.clientX-m.x)/r.width,dy=(e.clientY-m.y)/r.height;
+if(m.k=='txt'){TH.tx=c(m.tx+dx,0,1);TH.ty=c(m.ty+dy,0,1)}
+else if(m.k=='bar'){TH.by=c(m.by+dy,0,1);TH.bpos=c((e.clientX-r.left)/r.width,0,1);$('thbp').value=Math.round(TH.bpos*100);$('thbpv').textContent=Math.round(TH.bpos*100)+'%'}
+else{const S=thSrc();if(S){const sw=S.naturalWidth||S.videoWidth,sh=S.naturalHeight||S.videoHeight,s=Math.max(TH.w/sw,TH.h/sh)*TH.zoom,gx=(TH.w-sw*s),gy=(TH.h-sh*s);
+if(gx)TH.px=c(m.px+dx*TH.w/gx,0,1);if(gy)TH.py=c(m.py+dy*TH.h/gy,0,1)}}thr()});
+const up=()=>{m=null};thc.addEventListener('pointerup',up);thc.addEventListener('pointercancel',up)})();
+$('thb').onclick=()=>{if(!curId)return;TH.img=null;if(thv.dataset.id!=curId){thv.dataset.id=curId;thv.src='/api/result/'+curId;thv.onloadedmetadata=()=>{thv.currentTime=(thv.duration||1)*c(+$('thf').value,0,100)/100}}
+show('thumb');thSize();thr()};
+$('thback').onclick=()=>show('res');
+$('thsave').onclick=()=>{const cv=document.createElement('canvas');cv.width=TH.w;cv.height=TH.h;thRender(cv.getContext('2d'),TH.w,TH.h,false);
+cv.toBlob(b=>{if(!b)return;const a=document.createElement('a'),n=($('fn').value.trim()||$('fn').placeholder||'thumbnail').replace(/[\\\/:*?"<>|]/g,'').slice(0,60);a.href=URL.createObjectURL(b);a.download=n+'_thumbnail.jpg';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000)},'image/jpeg',.95)};
 
 // ---- ခလုတ်နှိပ်သံ (Pop)
 const POP="data:audio/mpeg;base64,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";
