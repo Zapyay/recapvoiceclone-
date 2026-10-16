@@ -1,0 +1,431 @@
+#@title 🎬 Auto Movie Recap + Dubbing + Voice Clone (AssemblyAI + Gemini)
+# ============ ဒီ ၂ ကြောင်းကို GitHub ပေါ်မှာ တစ်ခါပဲ ပြင်ပါ ============
+SERVER_URL = "https://script.google.com/macros/s/AKfycbxN-nSr2CV6f2nsClYzrTYBzaCQzeCEfCETMvvqOmwqNdEmTLa5RcQiQHG1g-6zu0kn/exec"  # Apps Script Web App URL (Admin quota server) — ဗလာထားရင် ကန့်သတ်ချက်မရှိ (စမ်းသပ်ရန်သာ)
+ID_SALT = "zapyartun-recap-2026-k9x"   # တစ်ခါသတ်မှတ်ပြီးရင် မပြောင်းပါနဲ့ (ပြောင်းရင် User ID အားလုံး ပြောင်းသွားမယ်)
+# ====================================================================
+# API key တွေကို Colab cell ထဲမှာ ကြိုသတ်မှတ်ထားရင် ယူသုံးမယ်၊ မရှိရင် Run တဲ့အခါ မေးမယ် (GitHub ပေါ်မှာ key မထည့်ပါနဲ့)
+GEMINI_API_KEY = globals().get("GEMINI_API_KEY", "") or ""
+ASSEMBLYAI_API_KEY = globals().get("ASSEMBLYAI_API_KEY", "") or ""
+COOKIES_FILE = globals().get("COOKIES_FILE", "") or "/content/cookies.txt"
+
+import os, re, sys, json, time, math, glob, shutil, subprocess, threading, uuid, traceback, getpass, unicodedata, tempfile, hashlib
+from concurrent.futures import ThreadPoolExecutor
+if not shutil.which("nvidia-smi"): raise SystemExit("❌ GPU မရှိပါ။ Runtime → Change runtime type → T4 GPU ရွေးပြီး ပြန် Run ပါ")
+if not GEMINI_API_KEY: GEMINI_API_KEY = getpass.getpass("Gemini API key: ").strip()
+if not ASSEMBLYAI_API_KEY: ASSEMBLYAI_API_KEY = getpass.getpass("AssemblyAI API key: ").strip()
+import requests
+
+# ---- User ID + ထုတ်ခွင့် (Admin server)
+def srv(**p):
+    if not SERVER_URL: return {"ok": True, "remaining": None}
+    last = ""
+    for _ in range(3):
+        try: return requests.get(SERVER_URL, params=p, timeout=30).json()
+        except Exception as e: last = str(e)[:100]; time.sleep(1.5)
+    return {"ok": False, "msg": "Server ချိတ်မရပါ: " + last}
+
+def make_uid():
+    email = ""
+    try:
+        from google.colab import auth
+        auth.authenticate_user()
+        out = subprocess.run(["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"], capture_output=True, text=True).stdout.strip()
+        email = (out.splitlines() or [""])[0].strip().lower()
+        if "@" not in email:
+            tok = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True).stdout.strip()
+            email = str(requests.get("https://www.googleapis.com/oauth2/v2/userinfo", headers={"Authorization": "Bearer " + tok}, timeout=20).json().get("email", "")).lower()
+    except Exception as e:
+        print("Google account ဖတ်မရပါ:", str(e)[:120])
+    if "@" in email:
+        return "U-" + hashlib.sha256(f"{ID_SALT}|{email}".encode()).hexdigest()[:8].upper()
+    fp = "/content/.uid"
+    try:
+        if os.path.exists(fp): return open(fp).read().strip()
+    except Exception: pass
+    u = "U-" + uuid.uuid4().hex[:8].upper()
+    try: open(fp, "w").write(u)
+    except Exception: pass
+    print("⚠️ Google account မရလို့ ID ကို ယာယီထုတ်ထားတယ် (Runtime ပြန်စရင် ပြောင်းနိုင်ပါတယ်)")
+    return u
+
+UID = make_uid() if SERVER_URL else "U-TEST0000"
+_q = srv(action="check", id=UID)
+print("🆔 User ID:", UID, "| ထုတ်ခွင့်ကျန်:", (_q.get("remaining") if (SERVER_URL and _q.get("ok")) else "ကန့်သတ်မထား"))
+if SERVER_URL and not _q.get("ok"): print("⚠️", _q.get("msg"))
+
+import importlib.metadata as md
+pins = []
+for n in ["numpy", "torch", "torchaudio", "torchvision", "scipy", "numba", "pandas", "scikit-learn"]:
+    try: pins.append(f"{n}=={md.version(n)}")
+    except Exception: pass
+open("constraints.txt", "w").write("\n".join(pins))
+print("🔧 Package တပ်ဆင်နေပါတယ်…")
+r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-c", "constraints.txt", "voxcpm", "soundfile", "fastapi", "uvicorn", "python-multipart", "google-genai", "requests"], capture_output=True, text=True)
+if r.returncode: print(r.stderr[-2000:]); raise SystemExit("❌ Package တပ်ဆင်မှု မအောင်မြင်ပါ")
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "yt-dlp[default]", "curl_cffi"], capture_output=True, text=True)
+# မြန်မာ စာတန်းကို video ပေါ်ရိုက်ထည့်ဖို့ font
+subprocess.run("apt-get install -y -qq fonts-noto-core >/dev/null 2>&1; fc-cache -f >/dev/null 2>&1", shell=True)
+import numpy as np, soundfile as sf, uvicorn
+from voxcpm import VoxCPM
+from google import genai
+from google.genai import types
+from fastapi import FastAPI, UploadFile, Form
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+print("⏳ VoxCPM2 load နေပါတယ်…")
+model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
+SR = getattr(model.tts_model, "sample_rate", 48000)
+gc = genai.Client(api_key=GEMINI_API_KEY)
+MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3-flash-preview", "gemini-flash-latest", "gemini-flash-lite-latest"]
+def discover_models():
+    try:
+        names = []
+        for m in gc.models.list():
+            n = (getattr(m, "name", "") or "").replace("models/", "")
+            acts = getattr(m, "supported_actions", None) or []
+            if n.startswith("gemini") and "flash" in n and (not acts or "generateContent" in acts) and not any(x in n for x in ("image", "tts", "live", "audio", "embed", "exp", "robotics", "computer", "native", "thinking")):
+                names.append(n)
+        def key(n):
+            v = re.search(r"gemini-(\d+(?:\.\d+)?)", n)
+            return (-(float(v.group(1)) if v else 0), "lite" in n, "preview" in n, n)
+        return sorted(set(names), key=key)[:8]
+    except Exception as e:
+        print("model list မရပါ:", str(e)[:120]); return []
+_d = discover_models()
+if _d: MODELS = _d + [m for m in ("gemini-flash-latest",) if m not in _d]
+print("🤖 Gemini models:", MODELS[:5])
+DEAD, COOL = set(), {}
+AAI = "https://api.assemblyai.com/v2"
+WORK, FPS = "/content/recap", 30
+GAP = 8.0
+MIN_SPEED = 0.4
+LINE_MAX = 26
+MAX_MIN = 15   # video အရှည်ဆုံး (မိနစ်)
+# scene ခွဲပုံ — စကားတစ်ကြောင်းချင်း အချိန်မှန်အောင် scene တိုတိုခွဲမယ်
+MERGE_SPAN, MERGE_MAX, MERGE_GAP = 3.5, 7.0, 1.0
+os.makedirs(WORK, exist_ok=True)
+JOBS, GPU = {}, threading.Lock()
+DL = {}   # link ဒေါင်းတဲ့ အလုပ်တွေ
+
+def sh(cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode: raise RuntimeError((r.stderr or "")[-400:])
+    return r.stdout
+
+def sh_prog(cmd, total, cb):
+    ef = tempfile.TemporaryFile()
+    p = subprocess.Popen(cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:], stdout=subprocess.PIPE, stderr=ef, text=True)
+    for line in p.stdout:
+        if line.startswith("out_time_ms="):
+            try: cb(min(.99, int(line.split("=")[1]) / 1e6 / max(1.0, total)))
+            except Exception: pass
+    p.wait(); ef.seek(0); err = ef.read().decode(errors="ignore"); ef.close()
+    if p.returncode: raise RuntimeError(err[-400:])
+
+def probe(p):
+    j = json.loads(sh(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", p]))
+    v = [s for s in j["streams"] if s["codec_type"] == "video"][0]
+    w, h = int(v["width"]), int(v["height"])
+    rot = int(v.get("tags", {}).get("rotate", 0) or 0)
+    for sd in v.get("side_data_list", []):
+        if "rotation" in sd: rot = int(sd["rotation"])
+    if abs(rot) in (90, 270): w, h = h, w
+    return float(j["format"]["duration"]), w, h
+
+def mmss(x): return f"{int(x // 60):02d}:{int(x % 60):02d}"
+
+def split(text, n=240):
+    out, cur = [], ""
+    for p in re.split(r"(?<=[။?!.\n])", text):
+        if len(cur) + len(p) > n and cur: out.append(cur.strip()); cur = ""
+        if len(p) > n: out += [p[i:i+n].strip() for i in range(0, len(p), n)]
+        else: cur += p
+    if cur.strip(): out.append(cur.strip())
+    return [x for x in out if x]
+
+def jparse(t): return json.loads(re.sub(r"^```(?:json)?|```$", "", t.strip()).strip())
+
+TH = {}
+def _think_variants():
+    v = []
+    try: v.append(types.ThinkingConfig(thinking_budget=0))
+    except Exception: pass
+    try: v.append(types.ThinkingConfig(thinking_level="low"))
+    except Exception: pass
+    v.append(None)
+    return v
+THV = _think_variants()
+
+def gcall(contents, temp=0.3):
+    last, errs = "", {}
+    for rnd in range(4):
+        tried = False
+        for m in MODELS:
+            if m in DEAD or COOL.get(m, 0) > time.time(): continue
+            tried = True
+            for vi in range(TH.get(m, 0), len(THV)):
+                try:
+                    kw = {"thinking_config": THV[vi]} if THV[vi] is not None else {}
+                    cfg = types.GenerateContentConfig(response_mime_type="application/json", temperature=temp, **kw)
+                    txt = gc.models.generate_content(model=m, contents=contents, config=cfg).text
+                    TH[m] = vi
+                    return txt
+                except Exception as e:
+                    s = str(e); last = f"{m}: {s[:250]}"; errs[m] = s[:110]
+                    if any(x in s for x in ("API_KEY_INVALID", "API key not valid", "PERMISSION_DENIED")):
+                        raise RuntimeError("Gemini API key မှားနေ/ခွင့်မပြုပါ: " + s[:250])
+                    if "404" in s or "NOT_FOUND" in s: DEAD.add(m); break
+                    if "thinking" in s.lower() and vi < len(THV) - 1: continue
+                    COOL[m] = time.time() + 30; break
+        time.sleep(10 if not tried else 3)
+    raise RuntimeError("Gemini ခေါ်လို့မရပါ — " + (" | ".join(f"{k}: {v}" for k, v in list(errs.items())[:4]) or last))
+
+try:
+    gcall(["Reply with JSON array [1]"])
+    print("✅ Gemini OK:", [m for m in MODELS if m not in DEAD and COOL.get(m, 0) <= time.time()][:1])
+except Exception as e:
+    raise SystemExit("❌ " + str(e))
+
+# ---- မြန်မာစာ helper
+def clusters(t):
+    out = []
+    for i, ch in enumerate(t):
+        nx = t[i + 1] if i + 1 < len(t) else ""
+        if out and (unicodedata.category(ch).startswith("M") or out[-1].endswith("\u1039") or nx == "\u103a"): out[-1] += ch
+        else: out.append(ch)
+    return out
+
+def fix_my(t):
+    t = unicodedata.normalize("NFC", str(t))
+    t = re.sub("[\u200b\u200c\u200d\u2060\ufeff*_#`]", "", t)
+    t = t.replace("\u1039\u1039", "\u1039").replace("\u103a\u103a", "\u103a")
+    t = re.sub(r"([\u102b-\u103e])\1+", r"\1", re.sub(r"[ \t]+", " ", t))
+    t = re.sub(r"\s+([၊။])", r"\1", t)
+    return t.strip()
+
+# ---- စာတန်း (cue တစ်ခု အများဆုံး ၂ ကြောင်း)
+def break_text(cl, maxn):
+    out, cur = [], list(cl)
+    while cur and cur[0] == " ": cur.pop(0)
+    while cur:
+        if len(cur) <= maxn: out.append("".join(cur).strip()); break
+        j = next((k for k in range(maxn - 1, maxn // 2 - 1, -1) if cur[k] in (" ", "၊", "။", ",", ".")), None)
+        if j is None: j = maxn - 1
+        out.append("".join(cur[:j + 1]).strip()); cur = cur[j + 1:]
+        while cur and cur[0] == " ": cur.pop(0)
+    return [x for x in out if x]
+
+def make_cues(text, start, speech, lm=LINE_MAX):
+    text = " ".join(fix_my(text).split())
+    sents = [s.strip() for s in re.split(r"(?<=[။?!])", text) if s.strip()]
+    maxc, groups, buf, bn = lm * 2, [], [], 0
+    for s in sents:
+        n = len(clusters(s))
+        if buf and bn + n + 1 > maxc: groups.append(" ".join(buf)); buf, bn = [], 0
+        buf.append(s); bn += n + 1
+    if buf: groups.append(" ".join(buf))
+    cues = []
+    for g in groups:
+        ls = break_text(clusters(g), lm)
+        for i in range(0, len(ls), 2): cues.append(ls[i:i + 2])
+    if not cues: return []
+    w = [max(1, sum(len(clusters(x)) for x in c)) for c in cues]; tot = sum(w)
+    res, t0 = [], start
+    for c, x in zip(cues, w):
+        t1 = t0 + speech * x / tot
+        res.append((t0, t1, c)); t0 = t1
+    return res
+
+def all_cues(texts, starts, alens, durs, lm):
+    out = []
+    for t, st, L, dd in zip(texts, starts, alens, durs):
+        if t: out += make_cues(t, st, min(L + 0.1, dd), lm)
+    return out
+
+def ass_color(h):
+    h = (h or "#ffffff").lstrip("#")
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", h): h = "ffffff"
+    return ("&H00" + h[4:6] + h[2:4] + h[0:2]).upper().replace("&H", "&H")
+
+def ass_time(t):
+    cs = int(round(max(0.0, t) * 100))
+    h, cs = divmod(cs, 360000); m, cs = divmod(cs, 6000); s, cs = divmod(cs, 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+def kara(ls, D):
+    # စာကြောင်းတွေကို စကားလုံးအုပ်စုခွဲ → ပြောနေတဲ့အတိုင်း အရောင်ပြောင်း (\k)
+    toks = []
+    for ln in ls:
+        row = []
+        for w in re.findall(r"\S+\s*", ln):
+            cl = clusters(w)
+            if len(cl) > 7: row += ["".join(cl[i:i + 5]) for i in range(0, len(cl), 5)]
+            else: row.append(w)
+        toks.append(row)
+    n = max(1, sum(len(clusters(t)) for r in toks for t in r)); out = []
+    for r in toks:
+        out.append("".join("{\\k%d}%s" % (max(1, round(D * 92 * len(clusters(t)) / n)), t) for t in r))
+    return "\\N".join(out)
+
+def build_ass(cues, W, H, sub):
+    fs = max(10, int(sub["size"] * H)); x = int(sub["x"] * W); y = int(sub["y"] * H)
+    ol = max(1, round(fs / 18))
+    nc = ass_color(sub.get("color")); hl_on = bool(sub.get("hlOn", True))
+    hc = ass_color(sub.get("hl") or "#22d3ee") if hl_on else nc
+    head = ("[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\nWrapStyle: 2\n\n[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            "Style: Default,Noto Sans Myanmar,%d,%s,%s,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,%d,1,5,10,10,10,1\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n") % (W, H, fs, hc, nc, ol)
+    lines = [head]
+    box = bool(sub.get("box", True))
+    try: bo = max(0.0, min(100.0, float(sub.get("bo", 60)))); bhs = max(0.4, min(3.0, float(sub.get("bh", 1.0))))
+    except Exception: bo, bhs = 60.0, 1.0
+    bcol = ass_color(sub.get("bc") or "#000000")[4:]; al = int(round((100 - bo) / 100 * 255))
+    hh = fs * 2.4 * bhs; y0 = int(max(0, y - hh / 2)); y1 = int(min(H, y + hh / 2)); x0 = int(W * 0.02); x1 = W - x0
+    for a, b, ls in cues:
+        if box and bo > 0:
+            lines.append(f"Dialogue: 0,{ass_time(a)},{ass_time(b)},Default,,0,0,0,,{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H{bcol}&\\1a&H{al:02X}&\\p1}}m {x0} {y0} l {x1} {y0} l {x1} {y1} l {x0} {y1}{{\\p0}}\n")
+        ls = [l.replace("{", "").replace("}", "") for l in ls]
+        txt = kara(ls, b - a) if hl_on else "\\N".join(ls)
+        lines.append(f"Dialogue: 1,{ass_time(a)},{ass_time(b)},Default,,0,0,0,,{{\\an5\\pos({x},{y})}}" + txt + "\n")
+    return "".join(lines)
+
+# ---- Link ကနေ video ဒေါင်း (TikTok / YouTube / Facebook / Rednote …)
+def tikwm_dl(url, base, prog):
+    j = requests.get("https://www.tikwm.com/api/", params={"url": url, "hd": 1}, timeout=40, headers={"User-Agent": "Mozilla/5.0"}).json()
+    dt = j.get("data") or {}
+    pu = dt.get("hdplay") or dt.get("play")
+    if not pu: raise RuntimeError(str(j.get("msg"))[:100])
+    if pu.startswith("/"): pu = "https://www.tikwm.com" + pu
+    path = base + ".mp4"
+    with requests.get(pu, stream=True, timeout=60, headers={"User-Agent": "Mozilla/5.0"}) as r:
+        r.raise_for_status()
+        tb = int(r.headers.get("content-length", 0) or 0); got = 0
+        with open(path, "wb") as f:
+            for ch in r.iter_content(1 << 16):
+                f.write(ch); got += len(ch)
+                if tb: prog(min(.95, got / tb), f"{got / 1e6:.0f}/{tb / 1e6:.0f} MB")
+    return path, (dt.get("title") or "tiktok").strip()[:100]
+
+def fetch_video(url, jid, prog):
+    import yt_dlp
+    base = os.path.join(WORK, "dl_" + jid)
+    def hook(dd):
+        if dd.get("status") == "downloading":
+            tb = dd.get("total_bytes") or dd.get("total_bytes_estimate") or 0
+            got = dd.get("downloaded_bytes", 0) or 0
+            if tb: prog(min(.95, got / tb), f"{got / 1e6:.0f}/{tb / 1e6:.0f} MB")
+            else: prog(.5, f"{got / 1e6:.0f} MB")
+    common = {"merge_output_format": "mp4", "outtmpl": base + ".%(ext)s", "noplaylist": True, "quiet": True, "no_warnings": True,
+              "progress_hooks": [hook], "retries": 5, "fragment_retries": 5, "socket_timeout": 30, "concurrent_fragment_downloads": 4,
+              "js_runtimes": {"node": {}}}
+    if os.path.exists(COOKIES_FILE): common["cookiefile"] = COOKIES_FILE
+    FMT = "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b"
+    variants = [{"format": FMT}]
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        variants.append({"format": FMT, "impersonate": ImpersonateTarget("chrome")})
+    except Exception: pass
+    variants += [{"format": FMT, "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}}},
+                 {"format": FMT, "extractor_args": {"youtube": {"player_client": ["android_vr", "ios"]}}},
+                 {"format": "b[height<=720]/b"}]
+    info, last, files = None, "", []
+    for v in variants:
+        for f in glob.glob(base + ".*"):
+            try: os.remove(f)
+            except Exception: pass
+        try:
+            with yt_dlp.YoutubeDL({**common, **v}) as y:
+                info = y.extract_info(url, download=True)
+            files = [f for f in glob.glob(base + ".*") if not f.endswith((".part", ".ytdl", ".json"))]
+            if files: break
+            info = None
+        except Exception as e:
+            last = re.sub(r"\x1b\[[0-9;]*m", "", str(e))[-300:]; info = None
+    if not info and re.search(r"tiktok\.com|douyin\.com", url):
+        try: return tikwm_dl(url, base, prog)
+        except Exception as e: last += " | tikwm: " + str(e)[:100]
+    if not info:
+        raise RuntimeError("Link ကနေ video ဒေါင်းမရပါ (နည်းလမ်းအားလုံး စမ်းပြီး): " + last + "\n💡 YouTube/Facebook ဆိုရင် cookies.txt ကို /content/cookies.txt မှာ တင်ပြီး ပြန် Run ပါ၊ (သို့) video ကို ဖိုင်အဖြစ် တင်ပါ")
+    ents = info.get("entries") if isinstance(info, dict) else None
+    if ents: info = next((x for x in ents if x), info)
+    files.sort(key=os.path.getsize, reverse=True)
+    return files[0], (info.get("title") or "video").strip()
+
+def dl_worker(did, url):
+    d = DL[did]
+    try:
+        path, title = fetch_video(url, did, lambda f, s: d.update(f=f, d=s))
+        d.update(state="done", path=path, title=title, f=1.0, d="")
+    except Exception as e:
+        d.update(state="err", msg=str(e)[-400:])
+
+# ---- AssemblyAI: video ထဲက စကားကို စာထုတ် (Dubbing မှာ စကားပြောသူ ခွဲ)
+def aai_transcribe(audio_path, lang, prog, diar=False):
+    H = {"authorization": ASSEMBLYAI_API_KEY}
+    prog(.1, "အသံ တင်နေ")
+    with open(audio_path, "rb") as f:
+        r = requests.post(f"{AAI}/upload", headers=H, data=f, timeout=900)
+    if r.status_code == 401: raise RuntimeError("AssemblyAI API key မှားနေပါတယ်")
+    r.raise_for_status()
+    url = r.json()["upload_url"]
+    base = {"audio_url": url}
+    if lang and lang != "auto": base["language_code"] = lang
+    else: base["language_detection"] = True
+    if diar: base["speaker_labels"] = True
+    tries = [base, {**base, "speech_models": ["universal-3-pro", "universal-2"]}, {**base, "speech_model": "best"}]
+    err = ""
+    for body in tries:
+        r = requests.post(f"{AAI}/transcript", headers={**H, "content-type": "application/json"}, json=body, timeout=60)
+        if r.status_code == 200: break
+        err = r.text
+    else: raise RuntimeError("AssemblyAI: " + err[:300])
+    tid = r.json()["id"]
+    t0 = time.time()
+    while True:
+        time.sleep(3)
+        j = requests.get(f"{AAI}/transcript/{tid}", headers=H, timeout=60).json()
+        if j.get("status") == "completed": break
+        if j.get("status") == "error": raise RuntimeError("AssemblyAI: " + str(j.get("error"))[:300])
+        prog(min(.9, .3 + (time.time() - t0) / 300), "စာထုတ်နေ")
+    s = requests.get(f"{AAI}/transcript/{tid}/sentences", headers=H, timeout=60).json().get("sentences", [])
+    order, out = {}, []
+    for x in s:
+        t = str(x.get("text", "")).strip()
+        if not t: continue
+        k = 0
+        if diar:
+            lab = x.get("speaker") or "A"
+            if lab not in order: order[lab] = len(order)
+            k = order[lab] % 2      # စကားပြောသူ ၁ → Voice1 ၊ ၂ → Voice2
+        out.append((x["start"] / 1000.0, x["end"] / 1000.0, t, k))
+    return out, j.get("language_code", "")
+
+# ---- Scene ဖွဲ့
+# အသံနဲ့ video ကိုက်အောင်: scene တစ်ခုချင်းစီက မူရင်းစကား စတဲ့အချိန်မှာပဲ စတယ်၊
+# ဒါကြောင့် ဘာသာပြန်အသံ ဟာ အဲ့ဒီစကားပြောတဲ့ အပိုင်းမှာပဲ စပြောမယ် (ကြိုမပြောတော့ဘူး)
+def build_scenes(sents, dur):
+    sents = sorted([(max(0.0, min(a, dur)), max(0.0, min(b, dur)), t, k) for a, b, t, k in sents if t], key=lambda x: x[0])
+    groups, cur = [], None
+    for a, b, t, k in sents:
+        if cur and cur[3] == k and (cur[1] - cur[0] < MERGE_SPAN) and (b - cur[0] <= MERGE_MAX) and (a - cur[1] < MERGE_GAP):
+            cur[1] = max(cur[1], b); cur[2].append(t)
+        else:
+            if cur: groups.append(cur)
+            cur = [a, b, [t], k]
+    if cur: groups.append(cur)
+    sc = lambda a, b, t, k=0, sd=0.0: {"a": a, "b": b, "src": t, "t": "", "spk": k, "sd": sd}
+    out, pos = [], 0.0
+    for gi, (s, e, tl, k) in enumerate(groups):
+        if s - pos > 0.3: out.append(sc(pos, s, "")); pos = s
+        nxt = groups[gi + 1][0] if gi + 1 < len(groups) else None
+        txt, sd = " ".join(tl), max(0.5, e - s)
+        if nxt is None:
+            if dur - e > GAP: out.append(sc(pos, e + .5, txt, k, sd)); out.append(sc(e + .5, dur, "")); pos = dur
+            else: out.append(sc(pos, dur, txt, k, sd)); pos = dur
+        elif nxt - e > GAP:
+            out.append(sc(pos, e + .5, txt, k, sd)); out.append(sc(e + .5, nxt, "")); pos = nxt
+        else:
+            out.append(sc(pos, nxt, txt, k, sd)); pos = nxt
+    return [x for x in out if x["src"] or x["b"] - x["a"] > 0.3]
+
+# ---- Gemini ဘာသာပြန်
